@@ -1,0 +1,28 @@
+# Model checkpoints & weights
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Datasets
+datasets/
+
+# Results & outputs (keep experiment configs, not raw outputs)
+output_results/
+*.npz
+
+# Python
+__pycache__/
+*.egg-info/
+*.pyc
+.eggs/
+dist/
+build/
+
+# Environment
+.env
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
