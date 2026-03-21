@@ -1,14 +1,12 @@
-# Model checkpoints & weights
-checkpoints/
+# Model weights (large files)
 *.pt
 *.pth
 *.ckpt
 
-# Datasets
+# Datasets (large files)
 datasets/
 
-# Results & outputs (keep experiment configs, not raw outputs)
-output_results/
+# Depth arrays (large)
 *.npz
 
 # Python
