@@ -294,7 +294,7 @@ def validate(model, loader, device):
 def main():
     parser = argparse.ArgumentParser(description="Phase 2: LoRA fine-tuning of Depth Pro")
     parser.add_argument("--dataset-path", type=str, default="datasets/nyu_depth_v2_labeled.mat")
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr-decoder", type=float, default=1e-4)
     parser.add_argument("--lr-lora", type=float, default=5e-5)
     parser.add_argument("--lora-rank", type=int, default=8)
@@ -302,6 +302,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--grad-loss-weight", type=float, default=0.5)
+    parser.add_argument("--unfreeze-last-n", type=int, default=0,
+                        help="Unfreeze last N encoder blocks (MLP+norm) alongside LoRA")
+    parser.add_argument("--lr-unfreeze", type=float, default=2e-5,
+                        help="LR for unfrozen encoder blocks")
     parser.add_argument("--warmup-epochs", type=int, default=3)
     parser.add_argument("--save-dir", type=str, default="checkpoints")
     parser.add_argument("--eval-every", type=int, default=5)
@@ -355,6 +359,26 @@ def main():
     for param in model.head.parameters():
         param.requires_grad = True
 
+    # Optionally unfreeze last N encoder blocks (MLP + LayerNorm, not just attention)
+    unfrozen_block_params = []
+    if args.unfreeze_last_n > 0:
+        for encoder_name in ["patch_encoder", "image_encoder"]:
+            encoder = getattr(model.encoder, encoder_name)
+            n_blocks = len(encoder.blocks)
+            for block_idx in range(n_blocks - args.unfreeze_last_n, n_blocks):
+                block = encoder.blocks[block_idx]
+                for name, param in block.named_parameters():
+                    # Skip LoRA params (already in lora_params) and original frozen weights
+                    if "lora_" in name:
+                        continue
+                    if "original" in name:
+                        continue
+                    # Unfreeze MLP and norm layers
+                    if any(k in name for k in ["mlp", "norm", "ls"]):
+                        param.requires_grad = True
+                        unfrozen_block_params.append(param)
+        print(f"Unfroze last {args.unfreeze_last_n} blocks (MLP+norm): {sum(p.numel() for p in unfrozen_block_params)/1e6:.2f}M params")
+
     # Keep FOV frozen
     if hasattr(model, "fov"):
         for param in model.fov.parameters():
@@ -362,15 +386,17 @@ def main():
 
     # Count parameters
     lora_trainable = sum(p.numel() for p in lora_params)
+    unfrozen_trainable = sum(p.numel() for p in unfrozen_block_params)
     decoder_trainable = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
     head_trainable = sum(p.numel() for p in model.head.parameters() if p.requires_grad)
     total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\nTrainable parameters:")
-    print(f"  LoRA:    {lora_trainable/1e6:.2f}M")
-    print(f"  Decoder: {decoder_trainable/1e6:.2f}M")
-    print(f"  Head:    {head_trainable/1e6:.2f}M")
-    print(f"  Total:   {total_trainable/1e6:.2f}M / {total_params/1e6:.1f}M ({100*total_trainable/total_params:.1f}%)")
+    print(f"  LoRA:      {lora_trainable/1e6:.2f}M")
+    print(f"  Unfrozen:  {unfrozen_trainable/1e6:.2f}M")
+    print(f"  Decoder:   {decoder_trainable/1e6:.2f}M")
+    print(f"  Head:      {head_trainable/1e6:.2f}M")
+    print(f"  Total:     {total_trainable/1e6:.2f}M / {total_params/1e6:.1f}M ({100*total_trainable/total_params:.1f}%)")
 
     # Enable gradient checkpointing for memory savings
     if hasattr(model.encoder.patch_encoder, "set_grad_checkpointing"):
@@ -416,12 +442,17 @@ def main():
     si_loss_fn = ScaleInvariantLogLoss(si_lambda=0.5)
     grad_loss_fn = GradientMatchingLoss()
 
-    # Discriminative learning rates: LoRA gets lower LR
-    optimizer = torch.optim.AdamW([
+    # Discriminative learning rates: encoder gets lowest, decoder gets highest
+    param_groups = [
         {"params": lora_params, "lr": args.lr_lora, "weight_decay": 1e-2},
         {"params": list(model.decoder.parameters()) + list(model.head.parameters()),
          "lr": args.lr_decoder, "weight_decay": 1e-4},
-    ])
+    ]
+    if unfrozen_block_params:
+        param_groups.append(
+            {"params": unfrozen_block_params, "lr": args.lr_unfreeze, "weight_decay": 1e-2}
+        )
+    optimizer = torch.optim.AdamW(param_groups)
 
     # Cosine annealing (after warmup)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -484,7 +515,8 @@ def main():
 
             if val_metrics["abs_rel"] < best_abs_rel:
                 best_abs_rel = val_metrics["abs_rel"]
-                save_path = Path(args.save_dir) / "depth_pro_lora_best.pt"
+                suffix = f"_unfreeze{args.unfreeze_last_n}" if args.unfreeze_last_n > 0 else ""
+                save_path = Path(args.save_dir) / f"depth_pro_lora{suffix}_best.pt"
                 torch.save(model.state_dict(), save_path)
                 print(f"  -> Saved best model (AbsRel: {best_abs_rel:.4f})")
         else:
@@ -496,10 +528,11 @@ def main():
         torch.cuda.empty_cache()
 
     # Save final model and log
-    final_path = Path(args.save_dir) / "depth_pro_lora_final.pt"
+    suffix = f"_unfreeze{args.unfreeze_last_n}" if args.unfreeze_last_n > 0 else ""
+    final_path = Path(args.save_dir) / f"depth_pro_lora{suffix}_final.pt"
     torch.save(model.state_dict(), final_path)
 
-    log_path = Path(args.save_dir) / "training_log_lora.json"
+    log_path = Path(args.save_dir) / f"training_log_lora{suffix}.json"
     with open(log_path, "w") as f:
         json.dump(training_log, f, indent=2)
 

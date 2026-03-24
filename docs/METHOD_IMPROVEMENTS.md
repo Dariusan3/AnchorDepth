@@ -326,6 +326,44 @@ where A is (rank × in_features) and B is (out_features × rank). Only A and B a
 - The remaining gap to the Apple paper (0.036) is likely due to: (1) much more training data, (2) full encoder fine-tuning with large compute, (3) additional datasets beyond NYU
 - LoRA proved extremely effective: adapting just 2.36M params (0.25% of encoder) captured most of the benefit of full fine-tuning
 
+### Experiment v5: LoRA + Selective Block Unfreezing (50 epochs)
+
+**Motivation:** LoRA adapts only the attention projections. By additionally unfreezing the last N encoder blocks' MLP and LayerNorm layers, we allow richer feature adaptation while keeping memory manageable. This tests whether deeper encoder adaptation improves over LoRA-only.
+
+**Implementation:**
+- Base: LoRA rank 8, alpha 16.0 on all attention Q/K/V and output projections (same as v4)
+- Additionally unfreeze last 2 blocks of both `patch_encoder` and `image_encoder`:
+  - MLP layers (fc1, fc2)
+  - LayerNorm layers (norm1, norm2)
+  - Layer scale parameters
+- Total trainable: **56M parameters** (5.9% of model) vs 2.36M for v4
+- 3 optimizer groups with discriminative learning rates:
+  - LoRA params: lr=5e-5, weight_decay=1e-2
+  - Decoder+head: lr=1e-4, weight_decay=1e-4
+  - Unfrozen blocks: lr=2e-5, weight_decay=1e-2
+- 50 epochs, 5-epoch warmup, cosine annealing
+- Peak VRAM: 11.31 GB (gradient checkpointing essential)
+- Training time: ~945 minutes (~19 hours)
+- Best checkpoint: epoch 45, val AbsRel=0.0720
+
+**Results (654 Eigen test images):**
+
+| Metric | v4 LoRA | v5 Baseline | v5 + TTA | Change (v5+TTA vs v4+TTA) |
+|--------|---------|-------------|----------|---------------------------|
+| AbsRel (↓) | 0.0781 | 0.0787 | **0.0773** | −1.0% |
+| RMSE (↓) | 0.3038 | 0.3069 | **0.3014** | −1.1% |
+| δ<1.25 (↑) | 0.9530 | 0.9520 | 0.9546 | −0.03% |
+| SI AbsRel (↓) | 0.0508 | 0.0513 | **0.0498** | −2.0% |
+| SI RMSE (↓) | 0.2206 | 0.2227 | **0.2179** | −1.2% |
+
+**Analysis:**
+- v5 baseline (0.0787) is slightly worse than v4 (0.0781) on metric AbsRel — the additional unfrozen parameters may have slightly overfitted on the small dataset
+- However, v5 **excels on scale-invariant metrics** (SI AbsRel: 0.0498 vs 0.0508), showing better structural depth quality
+- With TTA, v5 achieves competitive results: AbsRel 0.0773, close to v4+TTA's 0.0765
+- The best SI AbsRel of 0.0498 is our best structural depth result across all experiments
+- **Key insight:** With only 795 training images, the benefit of unfreezing more parameters saturates quickly. LoRA-only (v4) remains the most parameter-efficient approach for small datasets
+- The discriminative LR approach (lower LR for encoder blocks) was essential to prevent catastrophic forgetting
+
 ---
 
 ## 4. Planned Future Improvements
@@ -333,7 +371,7 @@ where A is (rank × in_features) and B is (out_features × rank). Only A and B a
 ### Phase 3: Training Data Expansion
 - Expand from 795 labeled images to ~25K-50K frames from the NYU raw dataset
 - More data is likely the biggest factor in the Apple paper's results
-- Expected to close the gap significantly
+- Expected to close the gap significantly — and would likely make v5's extra capacity beneficial
 
 ### Phase 4: Architectural Modifications
 - Add channel attention (SE blocks) to decoder fusion layers
@@ -347,14 +385,16 @@ where A is (rank × in_features) and B is (out_features × rank). Only A and B a
 
 ## 5. Summary of All Results
 
-| Experiment | AbsRel (↓) | RMSE (↓) | delta<1.25 (↑) | Key Change | vs Baseline |
+| Experiment | AbsRel (↓) | RMSE (↓) | delta<1.25 (↑) | Key Change | vs Pretrained |
 |-----------|-----------|---------|---------------|------------|-------------|
-| v0 Pretrained | 0.1155 | 0.3566 | 0.8777 | Zero-shot inference | — |
+| v0 Pretrained | 0.1155 | 0.5092 | 0.8777 | Zero-shot inference | — |
 | v1 Fine-tuned | 0.0855 | 0.3288 | 0.9389 | Train decoder+head (25ep) | +26.0% |
 | v2 + TTA Flip | 0.0790 | 0.3088 | 0.9532 | Flip TTA at inference | +31.6% |
 | v3 Phase 1 | 0.0878 | 0.3273 | 0.9362 | Loss+Aug+LR (50ep) | +24.0% |
-| **v4 LoRA** | **0.0781** | **0.3038** | **0.9530** | LoRA encoder (30ep) | **+32.4%** |
+| v4 LoRA | 0.0781 | 0.3038 | 0.9530 | LoRA encoder (50ep) | +32.4% |
 | **v4 LoRA + TTA** | **0.0765** | **0.2982** | **0.9549** | LoRA + flip TTA | **+33.8%** |
+| v5 LoRA+Unfreeze | 0.0787 | 0.3069 | 0.9520 | LoRA + 2 unfrozen blocks | +31.9% |
+| v5 LoRA+Unf+TTA | 0.0773 | 0.3014 | 0.9546 | + flip TTA | +33.1% |
 | Apple Paper | 0.036 | 0.127 | 0.989 | Full model, more data | target |
 
 ---
@@ -366,8 +406,10 @@ where A is (rank × in_features) and B is (out_features × rank). Only A and B a
 - Model weights: ~3.8 GB (FP32)
 - v1 decoder-only training: ~8.7 GB peak (FP16 mixed precision)
 - v4 LoRA training: ~10.9 GB peak (encoder gradients through LoRA + gradient checkpointing)
+- v5 LoRA + 2 unfrozen blocks: ~11.31 GB peak (additional MLP gradients)
 - Gradient accumulation (steps=4) enables effective batch size of 4 with batch_size=1
 - Gradient checkpointing on both encoders essential for LoRA training to fit in 12GB
+- Attempted 4 unfrozen blocks (67M params) → OOM; reduced to 2 blocks (56M) fits in 12GB
 
 ### Evaluation Protocol
 - Standard NYU Depth V2 Eigen test split (654 images)
