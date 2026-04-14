@@ -1,0 +1,101 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            i484sn18smh09rju0ccn6b3kee67csuo:
+                args:
+                    - --data-path
+                    - datasets/kitti_raw
+                    - --epochs
+                    - "40"
+                    - --stride
+                    - "6"
+                    - --save-dir
+                    - checkpoints/selfsup_v6
+                    - --wandb-name
+                    - v6-multiscale-40ep
+                codePath: train_kitti_selfsup_ms.py
+                codePathLocal: train_kitti_selfsup_ms.py
+                cpu_count: 8
+                cpu_count_logical: 8
+                cudaVersion: "12.2"
+                disk:
+                    /:
+                        total: "526765031424"
+                        used: "450206547968"
+                email: darius.osadici@yahoo.ro
+                executable: /home/ubuntu/anaconda3/envs/depth-pro/bin/python
+                git:
+                    commit: 4a9c21105d31e542bd366c0b493684498b45881d
+                    remote: https://github.com/Dariusan3/ml-depth-pro.git
+                gpu: NVIDIA GeForce RTX 4070 Ti
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 7680
+                      memoryTotal: "12878610432"
+                      name: NVIDIA GeForce RTX 4070 Ti
+                      uuid: GPU-c1ab0bcc-2d61-eb08-bbd2-caef40440380
+                host: ubuntu
+                memory:
+                    total: "25188741120"
+                os: Linux-5.15.0-139-generic-x86_64-with-glibc2.31
+                program: /home/ubuntu/ml-depth-pro/train_kitti_selfsup_ms.py
+                python: CPython 3.10.20
+                root: /home/ubuntu/ml-depth-pro
+                startedAt: "2026-04-13T11:50:53.885840Z"
+                writerId: i484sn18smh09rju0ccn6b3kee67csuo
+        m: []
+        python_version: 3.10.20
+        t:
+            "1":
+                - 1
+                - 41
+                - 49
+                - 63
+            "2":
+                - 1
+                - 41
+                - 49
+                - 63
+            "3":
+                - 13
+                - 16
+            "4": 3.10.20
+            "5": 0.25.1
+            "12": 0.25.1
+            "13": linux-x86_64
+batch_size:
+    value: 1
+epochs:
+    value: 40
+grad_accum:
+    value: 4
+lora_alpha:
+    value: 8
+lora_enabled:
+    value: true
+lora_rank:
+    value: 8
+lr_depth:
+    value: 0.0001
+lr_lora:
+    value: 1e-05
+lr_pose:
+    value: 0.0001
+multi_scale:
+    value: true
+pose_size:
+    value: 640x192
+scales:
+    value:
+        - 1
+        - 0.5
+        - 0.25
+        - 0.125
+smoothness_weight:
+    value: 0.001
+stride:
+    value: 6
+warmup_epochs:
+    value: 2

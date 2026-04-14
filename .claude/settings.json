@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda run:*)",
+      "Read(//home/ubuntu/ml-depth-pro/**)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(kill 14533 14538)",
+      "Read(//proc/14643/fd/**)",
+      "Bash(timeout 5 strace -p 14643 -e write)",
+      "Bash(kill 14638 14643)",
+      "Bash(chmod +x run_all_experiments.sh)",
+      "Bash(nohup bash:*)",
+      "Bash(kill 36170)",
+      "Bash(pkill -f \"run_all_experiments\")",
+      "Bash(python -c \"import torch; print\\('CUDA:', torch.cuda.is_available\\(\\)\\)\")",
+      "Bash(/home/ubuntu/anaconda3/envs/depth-pro/bin/python -c \"import torch; print\\('CUDA:', torch.cuda.is_available\\(\\), torch.version.cuda\\)\")",
+      "Bash(/home/ubuntu/anaconda3/envs/depth-pro/bin/python -c \"import torch; print\\('CUDA:', torch.cuda.is_available\\(\\)\\)\")",
+      "Bash(awk '{print $2}')",
+      "Bash(sudo dmesg:*)",
+      "Bash(lsmod)",
+      "Bash(ls /dev/nvidia*)",
+      "Bash(ls checkpoints/*.pt)",
+      "Bash(chmod +x eval_all_checkpoints.sh)"
+    ]
+  }
+}

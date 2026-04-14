@@ -1,0 +1,1 @@
+{"_wandb":{"runtime":0},"_runtime":0.081793621,"train/loss":0.18887385763321304,"train/auto_mask_ratio":1,"lr/pose":1e-06,"val/photometric":0.1588509601023462,"lr/lora":1e-06,"epoch":1,"train/photometric":0.1888538250760327,"lr/depth":1e-06,"train/smoothness":0.020032549510362156,"_step":1,"epoch_time_s":604.7736082077026,"_timestamp":1.775938076629944e+09}

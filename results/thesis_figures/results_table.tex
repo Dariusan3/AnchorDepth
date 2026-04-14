@@ -1,0 +1,17 @@
+\begin{table}[h]
+\centering
+\caption{Quantitative results on KITTI Eigen test split (697 images). All methods use median scaling. Best self-supervised result in \textbf{bold}.}
+\label{tab:kitti_results}
+\begin{tabular}{lccccccc}
+\toprule
+Method & AbsRel$\downarrow$ & SqRel$\downarrow$ & RMSE$\downarrow$ & RMSElog$\downarrow$ & $\delta<1.25\uparrow$ & $\delta<1.25^2\uparrow$ & $\delta<1.25^3\uparrow$ \\
+\midrule
+Monodepth2 (M) \cite{iccv2019} & 0.115 & 0.903 & 4.863 & 0.193 & 0.877 & 0.959 & 0.981 \\
+DIFFNet \cite{eccv2022} & 0.102 & 0.764 & 4.483 & 0.176 & 0.896 & 0.965 & 0.983 \\
+MonoViT \cite{3dv2022} & 0.099 & 0.708 & 4.372 & 0.175 & 0.900 & 0.965 & 0.983 \\
+\midrule
+Depth Pro pretrained & TBD & TBD & TBD & TBD & TBD & TBD & TBD \\
+\textbf{Ours (LoRA self-sup)} & \textbf{TBD} & \textbf{TBD} & \textbf{TBD} & \textbf{TBD} & \textbf{TBD} & \textbf{TBD} & \textbf{TBD} \\
+\bottomrule
+\end{tabular}
+\end{table}

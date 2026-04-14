@@ -1,0 +1,59 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            vrduss3d7zamksywfk7r90grz0quxl1r:
+                codePath: upload_v5_to_wandb.py
+                codePathLocal: upload_v5_to_wandb.py
+                email: darius.osadici@yahoo.ro
+                executable: /home/ubuntu/anaconda3/envs/depth-pro/bin/python
+                git:
+                    commit: 4a9c21105d31e542bd366c0b493684498b45881d
+                    remote: https://github.com/Dariusan3/ml-depth-pro.git
+                host: ubuntu
+                os: Linux-5.15.0-139-generic-x86_64-with-glibc2.31
+                program: /home/ubuntu/ml-depth-pro/upload_v5_to_wandb.py
+                python: CPython 3.10.20
+                root: /home/ubuntu/ml-depth-pro
+                startedAt: "2026-04-11T20:07:55.359919Z"
+                writerId: vrduss3d7zamksywfk7r90grz0quxl1r
+        m: []
+        python_version: 3.10.20
+        t:
+            "3":
+                - 2
+                - 13
+                - 16
+                - 61
+            "4": 3.10.20
+            "5": 0.25.1
+            "12": 0.25.1
+            "13": linux-x86_64
+batch_size:
+    value: 1
+epochs:
+    value: 20
+grad_accum:
+    value: 4
+lora_alpha:
+    value: 8
+lora_rank:
+    value: 8
+lr_depth:
+    value: 0.0001
+lr_lora:
+    value: 1e-05
+lr_pose:
+    value: 0.0001
+multi_scale:
+    value: false
+notes:
+    value: First run with correct autograd fix in warping.py.
+pose_size:
+    value: 640x192
+smoothness_weight:
+    value: 0.001
+stride:
+    value: 3
+warmup_epochs:
+    value: 3

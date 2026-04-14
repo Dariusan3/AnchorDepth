@@ -1,0 +1,33 @@
+{
+  "os": "Linux-5.15.0-139-generic-x86_64-with-glibc2.31",
+  "python": "CPython 3.10.20",
+  "startedAt": "2026-04-11T20:03:28.347427Z",
+  "args": [
+    "--live",
+    "--poll-interval",
+    "120"
+  ],
+  "program": "/home/ubuntu/ml-depth-pro/upload_v5_to_wandb.py",
+  "codePath": "upload_v5_to_wandb.py",
+  "codePathLocal": "upload_v5_to_wandb.py",
+  "git": {
+    "remote": "https://github.com/Dariusan3/ml-depth-pro.git",
+    "commit": "4a9c21105d31e542bd366c0b493684498b45881d"
+  },
+  "email": "darius.osadici@yahoo.ro",
+  "root": "/home/ubuntu/ml-depth-pro",
+  "host": "ubuntu",
+  "executable": "/home/ubuntu/anaconda3/envs/depth-pro/bin/python",
+  "cpu_count": 8,
+  "cpu_count_logical": 8,
+  "disk": {
+    "/": {
+      "total": "526765031424",
+      "used": "450298949632"
+    }
+  },
+  "memory": {
+    "total": "25188741120"
+  },
+  "writerId": "0crso5q6999qh9gb7wyn4pab5soyddi5"
+}

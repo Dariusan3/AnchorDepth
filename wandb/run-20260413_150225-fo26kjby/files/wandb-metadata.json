@@ -1,0 +1,52 @@
+{
+  "os": "Linux-5.15.0-139-generic-x86_64-with-glibc2.31",
+  "python": "CPython 3.10.20",
+  "startedAt": "2026-04-13T12:02:25.833986Z",
+  "args": [
+    "--data-path",
+    "datasets/kitti_raw",
+    "--epochs",
+    "40",
+    "--stride",
+    "6",
+    "--save-dir",
+    "checkpoints/selfsup_v6",
+    "--wandb-name",
+    "v6-multiscale-40ep"
+  ],
+  "program": "/home/ubuntu/ml-depth-pro/train_kitti_selfsup_ms.py",
+  "codePath": "train_kitti_selfsup_ms.py",
+  "codePathLocal": "train_kitti_selfsup_ms.py",
+  "git": {
+    "remote": "https://github.com/Dariusan3/ml-depth-pro.git",
+    "commit": "4a9c21105d31e542bd366c0b493684498b45881d"
+  },
+  "email": "darius.osadici@yahoo.ro",
+  "root": "/home/ubuntu/ml-depth-pro",
+  "host": "ubuntu",
+  "executable": "/home/ubuntu/anaconda3/envs/depth-pro/bin/python",
+  "cpu_count": 8,
+  "cpu_count_logical": 8,
+  "gpu": "NVIDIA GeForce RTX 4070 Ti",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "526765031424",
+      "used": "450207645696"
+    }
+  },
+  "memory": {
+    "total": "25188741120"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 4070 Ti",
+      "memoryTotal": "12878610432",
+      "cudaCores": 7680,
+      "architecture": "Ada",
+      "uuid": "GPU-c1ab0bcc-2d61-eb08-bbd2-caef40440380"
+    }
+  ],
+  "cudaVersion": "12.2",
+  "writerId": "g2hepp1iey60ylo8dtna5utqsrvxpqx9"
+}

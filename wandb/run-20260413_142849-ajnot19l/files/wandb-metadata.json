@@ -1,0 +1,40 @@
+{
+  "os": "Linux-5.15.0-139-generic-x86_64-with-glibc2.31",
+  "python": "CPython 3.10.20",
+  "startedAt": "2026-04-13T11:28:49.287053Z",
+  "args": [
+    "--data-path",
+    "datasets/kitti_raw",
+    "--epochs",
+    "40",
+    "--stride",
+    "6",
+    "--save-dir",
+    "checkpoints/selfsup_v6",
+    "--wandb-name",
+    "v6-multiscale-40ep"
+  ],
+  "program": "/home/ubuntu/ml-depth-pro/train_kitti_selfsup_ms.py",
+  "codePath": "train_kitti_selfsup_ms.py",
+  "codePathLocal": "train_kitti_selfsup_ms.py",
+  "git": {
+    "remote": "https://github.com/Dariusan3/ml-depth-pro.git",
+    "commit": "4a9c21105d31e542bd366c0b493684498b45881d"
+  },
+  "email": "darius.osadici@yahoo.ro",
+  "root": "/home/ubuntu/ml-depth-pro",
+  "host": "ubuntu",
+  "executable": "/home/ubuntu/anaconda3/envs/depth-pro/bin/python",
+  "cpu_count": 8,
+  "cpu_count_logical": 8,
+  "disk": {
+    "/": {
+      "total": "526765031424",
+      "used": "450511630336"
+    }
+  },
+  "memory": {
+    "total": "25188741120"
+  },
+  "writerId": "vzn87crfrhs890meqb7aw1574qbdfjf5"
+}
