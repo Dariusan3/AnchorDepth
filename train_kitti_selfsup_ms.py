@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
 """Self-supervised monocular depth estimation with Depth Pro + LoRA on KITTI.
+Multi-scale photometric loss variant (v6).
 
-Adapts the pretrained Depth Pro model using self-supervised photometric
-reprojection loss (Monodepth2-style) on KITTI raw monocular sequences.
-Uses LoRA for parameter-efficient encoder adaptation.
-
-Architecture:
-  - DepthNet: Depth Pro (frozen encoder + LoRA rank-8 + trainable decoder/head)
-  - PoseNet: ResNet-18 based ego-motion estimator (trained from scratch)
-
-Losses (Godard et al., ICCV 2019):
-  - Photometric reprojection (L1 + SSIM)
-  - Per-pixel minimum reprojection across source frames
-  - Auto-masking for static pixels
-  - Edge-aware smoothness regularization
+Extends train_kitti_selfsup.py with:
+  - Multi-scale photometric loss at 4 scales (1/1, 1/2, 1/4, 1/8)
+  - Longer training (40 epochs default)
+  - All v5 bug fixes included (warping autograd, focal length scaling)
 
 Usage:
-  python train_kitti_selfsup.py --epochs 20 --data-path datasets/kitti_raw
+  python train_kitti_selfsup_ms.py --epochs 40 --data-path datasets/kitti_raw
 """
 
 import argparse
@@ -33,6 +25,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import wandb
+
+# Set CUDA allocator config early to reduce fragmentation OOM
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 import depth_pro
@@ -48,7 +44,7 @@ from train_nyu_lora import LoRALinear, apply_lora_to_encoder
 def train_one_epoch(
     model, pose_net, warper, train_loader, optimizer, scaler,
     grad_accum_steps, device, epoch, smoothness_weight=1e-3,
-    use_auto_mask=True,
+    use_auto_mask=True, use_wandb=False, log_interval=50, global_step_offset=0,
 ):
     """Train one epoch of self-supervised depth estimation."""
     model.train()
@@ -78,48 +74,33 @@ def train_one_epoch(
         pose_h, pose_w = target_img.shape[2], target_img.shape[3]
 
         with torch.amp.autocast("cuda"):
-            # 1. Predict depth from target frame
-            canonical_inv_depth, _ = model(target_depth_input)
-            # Resize inverse depth to pose/loss resolution
-            inv_depth = F.interpolate(
-                canonical_inv_depth, size=(pose_h, pose_w),
-                mode="bilinear", align_corners=False,
-            )
-
-            # Scale canonical inverse depth using KITTI camera's actual focal length.
-            # K[0,0] = f_x (pixels) at pose resolution — use this instead of FOV head
-            # which was trained on internet images and is unreliable on KITTI.
-            f_px = batch["K"][:, 0, 0].to(device).to(torch.float)  # (B,)
-            scale = torch.clamp((pose_w / f_px).view(-1, 1, 1, 1), min=0.01, max=100.0)
-            inv_depth = inv_depth * scale
-
-            # Guard against NaN/Inf before loss computation
+            # 1. Single-scale depth prediction (multi-scale VRAM constrained on 12GB)
+            encodings = model.encoder(target_depth_input)
+            features, _ = model.decoder(encodings)
+            del encodings
+            raw = model.head(features)
+            del features
+            inv_depth = F.interpolate(raw, size=(pose_h, pose_w), mode="bilinear", align_corners=False)
+            del raw
+            f_px = batch["K"][:, 0, 0].to(device).to(torch.float)
+            scale_factor = torch.clamp((pose_w / f_px).view(-1, 1, 1, 1), min=0.01, max=100.0)
+            inv_depth = inv_depth * scale_factor
             inv_depth = torch.nan_to_num(inv_depth, nan=1.0, posinf=10.0, neginf=1e-6)
-            inv_depth = F.relu(inv_depth) + 1e-6  # ensure positive
+            inv_depth = F.relu(inv_depth) + 1e-6
             depth = 1.0 / torch.clamp(inv_depth, min=1e-4, max=1e4)
 
-            # 2. Predict ego-motion with PoseNet
-            # Normalize for ImageNet-pretrained ResNet
+            # 2. Predict ego-motion
             pose_target = normalize_imagenet(target_img)
-            pose_prev = normalize_imagenet(source_prev)
-            pose_next = normalize_imagenet(source_next)
+            pose_prev_n = normalize_imagenet(source_prev)
+            pose_next_n = normalize_imagenet(source_next)
+            pose_vec_prev = pose_net(pose_target, pose_prev_n)
+            pose_vec_next = pose_net(pose_target, pose_next_n)
+            T_prev = pose_vec_to_matrix(pose_vec_prev[:, :3], pose_vec_prev[:, 3:])
+            T_next = pose_vec_to_matrix(pose_vec_next[:, :3], pose_vec_next[:, 3:])
 
-            pose_vec_prev = pose_net(pose_target, pose_prev)  # (B, 6)
-            pose_vec_next = pose_net(pose_target, pose_next)  # (B, 6)
-
-            # Convert to 4x4 transformation matrices
-            T_prev = pose_vec_to_matrix(
-                pose_vec_prev[:, :3], pose_vec_prev[:, 3:]
-            )
-            T_next = pose_vec_to_matrix(
-                pose_vec_next[:, :3], pose_vec_next[:, 3:]
-            )
-
-            # 3. Warp source images to target view
+            # 3. Warp and compute photometric loss
             warped_prev = warper(source_prev, depth, T_prev, K, inv_K)
             warped_next = warper(source_next, depth, T_next, K, inv_K)
-
-            # 4. Compute self-supervised loss
             losses = compute_selfsup_loss(
                 target_img=target_img,
                 source_imgs=[source_prev, source_next],
@@ -128,7 +109,7 @@ def train_one_epoch(
                 smoothness_weight=smoothness_weight,
                 auto_mask=use_auto_mask,
             )
-
+            del warped_prev, warped_next
             loss = losses["total"] / grad_accum_steps
 
         scaler.scale(loss).backward()
@@ -150,6 +131,25 @@ def train_one_epoch(
         total_smooth += losses["smoothness"].item()
         total_mask_ratio += losses["auto_mask_ratio"].item()
         num_batches += 1
+
+        # Step-level WandB logging every log_interval steps
+        if use_wandb and (step + 1) % log_interval == 0:
+            global_step = global_step_offset + step + 1
+            with torch.no_grad():
+                depth_mean = depth.mean().item()
+                depth_std = depth.std().item()
+                pose_mag = pose_vec_prev[:, 3:].norm(dim=-1).mean().item()
+                scale_val = scale_factor.mean().item()
+            wandb.log({
+                "step/loss": losses["total"].item(),
+                "step/photometric": losses["photometric"].item(),
+                "step/depth_mean_m": depth_mean,
+                "step/depth_std_m": depth_std,
+                "step/pose_translation_norm": pose_mag,
+                "step/depth_scale_factor": scale_val,
+                "step/scaler_scale": scaler.get_scale(),
+                "step/epoch": epoch,
+            }, step=global_step)
 
         pbar.set_postfix(
             loss=f"{total_loss/num_batches:.4f}",
@@ -239,7 +239,7 @@ def main():
     parser.add_argument("--data-path", type=str, default="datasets/kitti_raw")
     parser.add_argument("--train-split", type=str, default="splits/eigen_train_files.txt")
     parser.add_argument("--val-split", type=str, default="splits/eigen_val_files.txt")
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--lr-depth", type=float, default=1e-4,
                         help="LR for decoder + head")
     parser.add_argument("--lr-lora", type=float, default=1e-5,
@@ -248,20 +248,52 @@ def main():
                         help="LR for PoseNet")
     parser.add_argument("--lora-rank", type=int, default=8)
     parser.add_argument("--lora-alpha", type=float, default=8.0)
+    parser.add_argument("--no-lora", action="store_true", help="Disable LoRA (decoder-only training)")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--smoothness-weight", type=float, default=1e-3)
-    parser.add_argument("--pose-size", type=str, default="640x192",
+    parser.add_argument("--pose-size", type=str, default="512x160",
                         help="WxH for PoseNet input")
     parser.add_argument("--stride", type=int, default=3,
                         help="Use every Nth training sample (KITTI 10Hz is redundant)")
     parser.add_argument("--warmup-epochs", type=int, default=2)
-    parser.add_argument("--save-dir", type=str, default="checkpoints")
+    parser.add_argument("--save-dir", type=str, default="checkpoints/selfsup_ms")
     parser.add_argument("--eval-every", type=int, default=2)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable WandB logging")
+    parser.add_argument("--wandb-project", type=str, default="depth-pro-selfsup")
+    parser.add_argument("--wandb-name", type=str, default="v6-multiscale-40ep")
     args = parser.parse_args()
 
     pose_w, pose_h = [int(x) for x in args.pose_size.split("x")]
+
+    # ================================================================
+    # WandB
+    # ================================================================
+    use_wandb = not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name,
+            config={
+                "epochs": args.epochs,
+                "lr_depth": args.lr_depth,
+                "lr_lora": args.lr_lora,
+                "lr_pose": args.lr_pose,
+                "lora_rank": args.lora_rank,
+                "lora_alpha": args.lora_alpha,
+                "batch_size": args.batch_size,
+                "grad_accum": args.grad_accum,
+                "smoothness_weight": args.smoothness_weight,
+                "pose_size": args.pose_size,
+                "stride": args.stride,
+                "warmup_epochs": args.warmup_epochs,
+                "multi_scale": True,
+                "scales": [1.0, 0.5],
+                "lora_enabled": not args.no_lora,
+            },
+        )
+        print(f"WandB run: {wandb.run.url}")
 
     print("=" * 60)
     print("Self-Supervised Depth Pro + LoRA on KITTI")
@@ -285,20 +317,23 @@ def main():
     for param in model.parameters():
         param.requires_grad = False
 
-    # Apply LoRA to encoder attention layers
-    print("\nApplying LoRA...")
-    lora_params = apply_lora_to_encoder(model, rank=args.lora_rank, alpha=args.lora_alpha)
-
-    # Move LoRA params to device
-    for encoder_name in ["patch_encoder", "image_encoder"]:
-        encoder = getattr(model.encoder, encoder_name)
-        for block in encoder.blocks:
-            if isinstance(block.attn.qkv, LoRALinear):
-                block.attn.qkv.lora_A = nn.Parameter(block.attn.qkv.lora_A.to(device))
-                block.attn.qkv.lora_B = nn.Parameter(block.attn.qkv.lora_B.to(device))
-            if isinstance(block.attn.proj, LoRALinear):
-                block.attn.proj.lora_A = nn.Parameter(block.attn.proj.lora_A.to(device))
-                block.attn.proj.lora_B = nn.Parameter(block.attn.proj.lora_B.to(device))
+    # Apply LoRA to encoder attention layers (skipped if --no-lora)
+    if not args.no_lora:
+        print("\nApplying LoRA...")
+        lora_params = apply_lora_to_encoder(model, rank=args.lora_rank, alpha=args.lora_alpha)
+        # Move LoRA params to device
+        for encoder_name in ["patch_encoder", "image_encoder"]:
+            encoder = getattr(model.encoder, encoder_name)
+            for block in encoder.blocks:
+                if isinstance(block.attn.qkv, LoRALinear):
+                    block.attn.qkv.lora_A = nn.Parameter(block.attn.qkv.lora_A.to(device))
+                    block.attn.qkv.lora_B = nn.Parameter(block.attn.qkv.lora_B.to(device))
+                if isinstance(block.attn.proj, LoRALinear):
+                    block.attn.proj.lora_A = nn.Parameter(block.attn.proj.lora_A.to(device))
+                    block.attn.proj.lora_B = nn.Parameter(block.attn.proj.lora_B.to(device))
+    else:
+        print("\nLoRA disabled (decoder-only training)")
+        lora_params = []
 
     # Unfreeze decoder + head
     for param in model.decoder.parameters():
@@ -312,14 +347,15 @@ def main():
             param.requires_grad = False
 
     # Refresh LoRA params list
-    lora_params = []
-    for encoder_name in ["patch_encoder", "image_encoder"]:
-        encoder = getattr(model.encoder, encoder_name)
-        for block in encoder.blocks:
-            if isinstance(block.attn.qkv, LoRALinear):
-                lora_params.extend([block.attn.qkv.lora_A, block.attn.qkv.lora_B])
-            if isinstance(block.attn.proj, LoRALinear):
-                lora_params.extend([block.attn.proj.lora_A, block.attn.proj.lora_B])
+    if not args.no_lora:
+        lora_params = []
+        for encoder_name in ["patch_encoder", "image_encoder"]:
+            encoder = getattr(model.encoder, encoder_name)
+            for block in encoder.blocks:
+                if isinstance(block.attn.qkv, LoRALinear):
+                    lora_params.extend([block.attn.qkv.lora_A, block.attn.qkv.lora_B])
+                if isinstance(block.attn.proj, LoRALinear):
+                    lora_params.extend([block.attn.proj.lora_A, block.attn.proj.lora_B])
 
     # Enable gradient checkpointing
     if hasattr(model.encoder.patch_encoder, "set_grad_checkpointing"):
@@ -445,12 +481,16 @@ def main():
         # provides minimal benefit and collapsed in v2 due to NaN loss bug.
         use_auto_mask = False
 
+        steps_per_epoch = len(train_loader)
         train_metrics = train_one_epoch(
             model, pose_net, warper, train_loader, optimizer, scaler,
             grad_accum_steps=args.grad_accum,
             device=device, epoch=epoch,
             smoothness_weight=args.smoothness_weight,
             use_auto_mask=use_auto_mask,
+            use_wandb=use_wandb,
+            log_interval=50,
+            global_step_offset=(epoch - 1) * steps_per_epoch,
         )
 
         if epoch > args.warmup_epochs:
@@ -507,6 +547,23 @@ def main():
                 f"time: {epoch_time:.1f}s | ETA: {eta/60:.1f}min"
             )
 
+        # WandB logging
+        if use_wandb:
+            wandb_log = {
+                "epoch": epoch,
+                "train/loss": train_metrics["loss"],
+                "train/photometric": train_metrics["photometric"],
+                "train/smoothness": train_metrics["smoothness"],
+                "train/auto_mask_ratio": train_metrics["auto_mask_ratio"],
+                "lr/lora": optimizer.param_groups[0]["lr"],
+                "lr/depth": optimizer.param_groups[1]["lr"],
+                "lr/pose": optimizer.param_groups[2]["lr"],
+                "epoch_time_s": epoch_time,
+            }
+            if "val_photometric" in log_entry:
+                wandb_log["val/photometric"] = log_entry["val_photometric"]
+            wandb.log(wandb_log, step=epoch)
+
         training_log.append(log_entry)
         torch.cuda.empty_cache()
 
@@ -526,6 +583,12 @@ def main():
     print(f"\nTotal training time: {total_time/60:.1f} minutes")
     print(f"Best validation photometric loss: {best_photo_loss:.4f}")
     print(f"GPU peak memory: {torch.cuda.max_memory_allocated()/1e9:.2f} GB")
+
+    if use_wandb:
+        wandb.summary["best_val_photometric"] = best_photo_loss
+        wandb.summary["total_train_time_min"] = total_time / 60
+        wandb.summary["gpu_peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
+        wandb.finish()
 
 
 if __name__ == "__main__":

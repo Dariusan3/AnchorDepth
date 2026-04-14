@@ -55,10 +55,12 @@ def load_calib(calib_dir):
     R_rect[:3, :3] = np.array(data["R_rect_00"].split(), dtype=np.float32).reshape(3, 3)
 
     # Velodyne to camera transformation
+    # calib_velo_to_cam.txt has separate R (3x3) and T (3x1)
     Tr_velo = np.eye(4, dtype=np.float32)
-    Tr_velo[:3, :] = np.array(data["T_02"].split() if "T_02" in data
-                                else data["T_velo_to_cam"].split(),
-                                dtype=np.float32).reshape(3, 4)
+    R_velo = np.array(data["R"].split(), dtype=np.float32).reshape(3, 3)
+    T_velo = np.array(data["T"].split(), dtype=np.float32).reshape(3, 1)
+    Tr_velo[:3, :3] = R_velo
+    Tr_velo[:3, 3] = T_velo.flatten()
 
     return P2, R_rect, Tr_velo
 
@@ -95,6 +97,10 @@ def project_velodyne_to_cam(velo_pts, P2, R_rect, Tr_velo, img_h, img_w):
     depth_map = np.zeros((img_h, img_w), dtype=np.float32)
     u = np.round(pts_2d[:, 0]).astype(int)
     v = np.round(pts_2d[:, 1]).astype(int)
+
+    # Clamp to valid pixel range (rounding can push to boundary)
+    u = np.clip(u, 0, img_w - 1)
+    v = np.clip(v, 0, img_h - 1)
 
     # Use closest point for each pixel (handle occlusions)
     for i in range(len(u)):

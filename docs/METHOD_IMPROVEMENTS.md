@@ -1,20 +1,22 @@
 # Depth Pro - Method Improvements for Monocular Depth Estimation
 
-## Bachelor Thesis: Improving Apple's Depth Pro for State-of-the-Art Monocular Metric Depth Estimation
+## Bachelor Thesis: Efficient Adaptation of Foundation Depth Models on Consumer GPUs
 
 **Author:** Dariusan3
 **Base Model:** Depth Pro (Apple, ICLR 2025) — "Depth Pro: Sharp Monocular Metric Depth in Less Than a Second"
 **Paper Reference:** Bochkovskii et al., arXiv:2410.02073
 **Hardware:** NVIDIA RTX 4070 Ti (12GB VRAM)
-**Dataset:** NYU Depth V2 (795 train / 654 Eigen test split)
+**Datasets:** NYU Depth V2 (supervised, v0–v5), KITTI Raw (self-supervised, v6+)
 
 ---
 
 ## 1. Introduction
 
-This document tracks all modifications made to Apple's Depth Pro model to improve monocular depth estimation performance on the NYU Depth V2 benchmark. Each experiment is documented with motivation, implementation details, results, and analysis.
+This document tracks all modifications made to Apple's Depth Pro model for monocular depth estimation. Each experiment is documented with motivation, implementation details, results, and analysis.
 
-The goal is to close the gap between the publicly available pretrained model (AbsRel=0.1155 zero-shot) and the paper's reported results (AbsRel=0.036) through systematic improvements to the training pipeline, loss functions, data augmentation, and inference strategies.
+**Phase 1 (v0–v5):** Supervised fine-tuning on NYU Depth V2 — exploring LoRA adaptation, decoder training, and test-time augmentation to close the gap between the publicly available pretrained model and paper-reported results.
+
+**Phase 2 (v6+):** Self-supervised monocular depth estimation on KITTI — the core thesis contribution. Uses photometric consistency from monocular video sequences to train without ground truth depth, following the Monodepth2 framework (Godard et al., ICCV 2019) adapted to Depth Pro's architecture.
 
 ---
 
@@ -366,12 +368,392 @@ where A is (rank × in_features) and B is (out_features × rank). Only A and B a
 
 ---
 
-## 4. Planned Future Improvements
+---
+
+## 4. Phase 2: Self-Supervised Training on KITTI
+
+### 4.1 Motivation — Pivot to Self-Supervised Learning
+
+The supervised experiments (v0–v5) demonstrated that Depth Pro can be effectively adapted with LoRA and achieves strong results on NYU Depth V2. However, the core thesis topic is **self-supervised monocular depth estimation** — learning depth from unlabeled video sequences without any ground truth annotations.
+
+Key motivations for the pivot:
+
+1. **Thesis scope:** Self-supervised monocular depth is the dominant paradigm for scalable depth estimation in autonomous driving, where labeling millions of frames is impractical.
+2. **Scalability:** KITTI Raw contains 39,810 training frames from 60 driving sequences — all unlabeled. Annotated datasets at this scale don't exist for indoor scenes.
+3. **Scientific contribution:** Adapting a metric depth foundation model (Depth Pro) to self-supervised training is a novel research direction. Prior self-supervised methods (Monodepth2, DIFFNet, DepthHints) train smaller custom architectures from scratch.
+4. **Consumer GPU constraint:** The thesis goal is efficient adaptation on a single RTX 4070 Ti (12GB), making LoRA-based fine-tuning of Depth Pro a natural fit.
+
+**Hypothesis:** By combining Depth Pro's powerful pretrained representations with Monodepth2-style photometric self-supervision, we can achieve competitive performance on KITTI without any depth annotations — while only updating 34.33M of 966M parameters (~3.6%).
+
+---
+
+### 4.2 Self-Supervised Training Framework
+
+The self-supervised approach follows **Monodepth2** (Godard et al., ICCV 2019) adapted to Depth Pro's architecture.
+
+#### Core Idea
+
+Given a monocular video sequence, consecutive frames share overlapping scene content. If we know the camera's relative motion between frames (ego-motion), we can **warp** a source frame to reconstruct the target frame using the predicted depth. The photometric error between the reconstructed and actual target frame serves as a training signal — without any ground truth depth.
+
+**Training signal equation:**
+
+```
+L_total = L_photo + λ_smooth * L_smooth
+L_photo = min(pe(I_t, warp(I_{t-1}, D_t, T_{t→t-1})),
+              pe(I_t, warp(I_{t+1}, D_t, T_{t→t+1})))
+```
+
+where `pe` is the photometric error (L1 + SSIM), `D_t` is the predicted depth, and `T` is the relative camera pose.
+
+#### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────┐
+│                   Training Pipeline              │
+│                                                  │
+│  Frame triplet (t-1, t, t+1) from KITTI video   │
+│       │                    │                     │
+│       ▼                    ▼                     │
+│  ┌──────────────┐   ┌──────────────┐            │
+│  │  Depth Pro   │   │   PoseNet    │            │
+│  │  (LoRA fine- │   │  (ResNet-18) │            │
+│  │   tuned)     │   │  6-ch input  │            │
+│  └──────────────┘   └──────────────┘            │
+│       │                    │                     │
+│   inv_depth             T_{t→s}                  │
+│   (scaled)            (6-DoF pose)               │
+│       │                    │                     │
+│       └────────┬───────────┘                     │
+│                ▼                                  │
+│        ┌──────────────┐                          │
+│        │    Warper    │ (differentiable)          │
+│        │  backproject │                          │
+│        │  transform   │                          │
+│        │  project     │                          │
+│        └──────────────┘                          │
+│                │                                  │
+│           warped_imgs                             │
+│                │                                  │
+│                ▼                                  │
+│        ┌──────────────┐                          │
+│        │  Photometric │ L_photo + L_smooth        │
+│        │  Loss        │                          │
+│        └──────────────┘                          │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+### 4.3 Network Components
+
+#### Depth Network: Depth Pro with LoRA
+
+The depth branch uses the full Depth Pro model with LoRA applied identically to v4:
+
+| Component | Architecture | Parameters | Trainable |
+|-----------|-------------|------------|-----------|
+| Patch Encoder | DINOv2-Large ViT + LoRA | 304M + 1.18M | LoRA only (1.18M) |
+| Image Encoder | DINOv2-Large ViT + LoRA | 304M + 1.18M | LoRA only (1.18M) |
+| Decoder | MultiresConvDecoder | 19.67M | Yes |
+| Depth Head | CNN (256→128→32→1) | 0.40M | Yes |
+| FOV Head | FOVNetwork | 304M | Frozen |
+
+**Input resolution:** 1536×1536 (mandatory — encoder hardcodes 5×5 and 3×3 patch grids requiring this exact resolution).
+
+**Canonical inverse depth scaling:** Depth Pro's FOV head predicts the camera's field of view. For geometrically consistent warping, the canonical inverse depth output must be scaled:
+
+```python
+f_px = 0.5 * W / tan(0.5 * fov_deg * π/180)
+inv_depth_metric = canonical_inv_depth * (W / f_px)
+```
+
+This converts the camera-agnostic canonical output to a metric-consistent inverse depth for the warping pipeline. This is a critical detail — without it, the warped reconstruction does not match the actual camera geometry, and the photometric signal is severely degraded.
+
+#### PoseNet: Ego-Motion Estimation
+
+A lightweight ResNet-18-based network estimates the 6-DoF relative pose between any two frames:
+
+| Component | Detail |
+|-----------|--------|
+| Architecture | ResNet-18 with modified first conv |
+| Input | 6-channel (target + source RGB concatenated) |
+| Output | 6-DoF vector: 3 (axis-angle rotation) + 3 (translation) |
+| Scale factor | ×0.01 (stabilizes early training) |
+| Resolution | 640×192 (lower than depth network to save VRAM) |
+| Parameters | 11.91M (all trainable) |
+
+PoseNet processes frame pairs (t, t-1) and (t, t+1) independently to obtain poses for both source frames.
+
+#### Differentiable Warper
+
+For each source frame, the warper reconstructs the target view:
+
+1. **Backproject:** Map target pixels → 3D points using predicted depth and camera intrinsics K
+2. **Transform:** Apply relative pose T to move 3D points to the source camera frame
+3. **Project:** Project 3D points to source image coordinates using K
+4. **Sample:** Bilinear grid_sample at the projected coordinates
+
+```python
+cam_points = K_inv @ pixel_coords * depth  # (B, 3, H*W)
+src_points = T[:, :3, :3] @ cam_points + T[:, :3, 3:]
+pix_coords = K @ src_points / src_points[:, 2:, :]  # normalize by Z
+warped = F.grid_sample(source, pix_coords_normalized, ...)
+```
+
+---
+
+### 4.4 Loss Functions
+
+#### Photometric Loss
+
+The photometric loss combines SSIM and L1 following Monodepth2:
+
+```
+pe(I_a, I_b) = α * (1 - SSIM(I_a, I_b)) / 2 + (1 - α) * |I_a - I_b|₁
+```
+
+with α=0.85 (SSIM-dominant). SSIM is computed with a 3×3 window.
+
+#### Per-Pixel Minimum Reprojection
+
+To handle occlusions (pixels visible in target but not in source frames), we take the **minimum photometric error** across both source frames per pixel:
+
+```
+L_photo = min(pe(I_t, warp(I_{t-1})), pe(I_t, warp(I_{t+1})))
+```
+
+Pixels occluded in one source frame typically have a lower error from the other, so the minimum naturally selects the better reconstruction.
+
+#### Auto-Masking for Stationary Pixels
+
+When the camera is stationary or an object moves at the same velocity as the camera, warping provides no useful signal (the warped image equals the source). Auto-masking excludes these pixels by masking out pixels where the photometric error from warping is *higher* than the identity error (copying the source frame directly):
+
+```
+mask = pe(I_t, warp(I_s)) < pe(I_t, I_s)
+L_photo = mean(mask * min_reproj_error)
+```
+
+**Warmup:** Auto-masking is disabled for the first 3 epochs. In early training, the depth and pose networks are poorly initialized, so warping quality is often worse than identity. Enabling auto-masking immediately would mask out most pixels and starve the network of gradient signal. After 3 epochs of unconstrained learning, the networks are accurate enough for auto-masking to help rather than hurt.
+
+#### Edge-Aware Smoothness Loss
+
+To encourage locally smooth depth while preserving edges, we use an edge-aware smoothness loss on the mean-normalized inverse depth:
+
+```
+disp = inv_depth / mean(inv_depth)   # normalize to prevent scale collapse
+L_smooth = mean(|∂disp/∂x| * e^{-|∂I/∂x|} + |∂disp/∂y| * e^{-|∂I/∂y|})
+```
+
+Mean normalization prevents the trivial solution of predicting all-zero (minimum) disparity. Computed in FP32 to avoid NaN from FP16 overflow in exp.
+
+**Total loss:**
+
+```
+L_total = L_photo + 1e-3 * L_smooth
+```
+
+---
+
+### 4.5 Dataset: KITTI Raw
+
+| Property | Value |
+|----------|-------|
+| Source | KITTI Raw dataset (Geiger et al., IJRR 2013) |
+| Split | Eigen/Zhou split (standard for self-supervised methods) |
+| Train sequences | 60 sequences, 5 recording dates |
+| Train frames | 39,810 (Zhou subset) → 13,270 with stride=3 |
+| Val frames | 4,424 → 1,475 with stride=3 |
+| Test frames | 697 (Eigen test split, fixed) |
+| Frame sampling | stride=3 (every 3rd frame, reduces redundancy from 10Hz video) |
+| Cameras | Left camera only (monocular) |
+| Resolution | 1242×375 (variable, cropped/padded to 1536×1536 for depth, 640×192 for pose) |
+
+**Why stride=3?** KITTI is recorded at 10Hz. Consecutive frames at ~30km/h (highway) differ by only ~0.8m, making them nearly identical. Using every 3rd frame (stride=3) reduces dataset size by 3× (5.5h/epoch vs 16.4h/epoch) while maintaining meaningful inter-frame motion for photometric training.
+
+**Evaluation protocol (Eigen test split):**
+- 697 frames with velodyne LiDAR ground truth
+- Garg/Eigen crop: removes sky and car hood (top 40%, bottom 5%)
+- Depth range: 1–80m (standard for KITTI outdoor)
+- Median scaling: multiply predicted depth by `median(gt) / median(pred)` per image (standard for self-supervised methods, which produce up-to-scale predictions)
+- Metrics: AbsRel, SqRel, RMSE, RMSE_log, δ<1.25, δ<1.25², δ<1.25³
+
+---
+
+### 4.6 Training Configuration
+
+| Hyperparameter | Value | Rationale |
+|----------------|-------|-----------|
+| Batch size | 1 | VRAM constraint (10.77GB peak) |
+| Gradient accumulation | 4 | Effective batch = 4 |
+| LoRA LR | 1e-5 | Lower LR for pretrained encoder |
+| Decoder/Head LR | 1e-4 | Higher LR for task-specific layers |
+| PoseNet LR | 1e-4 | Fresh network, higher LR |
+| Optimizer | AdamW | Weight decay=1e-4 |
+| Scheduler | CosineAnnealing (T_max=20) | Smooth LR decay |
+| Epochs | 20 | ~4.6 days on RTX 4070 Ti |
+| Warmup epochs | 3 | Disable auto-masking during init |
+| Smoothness weight | 1e-3 | Standard Monodepth2 setting |
+| Mixed precision | FP16 | AMP with GradScaler |
+| Gradient checkpointing | Both encoders | Required to fit in 12GB VRAM |
+| Depth resolution | 1536×1536 | Mandatory for Depth Pro |
+| Pose resolution | 640×192 | Standard Monodepth2 resolution |
+
+**VRAM budget:**
+
+| Component | VRAM |
+|-----------|------|
+| Depth Pro weights (FP16) | ~1.9 GB |
+| PoseNet weights | ~0.05 GB |
+| Activations + optimizer states | ~8.8 GB |
+| **Peak total** | **~10.77 GB** |
+
+Gradient checkpointing on both ViT encoders recomputes intermediate activations during backward pass, trading compute for memory. Without it, the 304M+304M encoder would overflow 12GB.
+
+---
+
+### 4.7 Experiment v6 — Self-Supervised KITTI Baseline (Pretrained Depth Pro)
+
+**Date:** 2026-03-30 (in progress)
+**Description:** Evaluate pretrained Depth Pro (zero-shot) on KITTI Eigen test set to establish the baseline for the self-supervised experiments.
+
+**Method:** Load pretrained `depth_pro.pt`, run inference on all 697 Eigen test frames. Apply Garg/Eigen crop and median scaling. No fine-tuning.
+
+**Expected:** Depth Pro was not trained on KITTI and uses metric depth (not scaled). Zero-shot performance on outdoor driving scenes should be lower than on indoor NYU scenes, since the model was likely trained on internet imagery with shorter depth ranges. This establishes the "untouched pretrained" baseline that v7 (self-supervised fine-tuning) must beat.
+
+**Results:** *(awaiting evaluation — running on CPU)*
+
+| Metric | v6 Pretrained (KITTI) | Monodepth2 (ref) |
+|--------|----------------------|-------------------|
+| AbsRel (↓) | TBD | 0.115 |
+| SqRel (↓) | TBD | 0.903 |
+| RMSE (↓) | TBD | 4.863 |
+| RMSE_log (↓) | TBD | 0.193 |
+| δ<1.25 (↑) | TBD | 0.877 |
+
+---
+
+### 4.8 Experiment v7 (v3 training run) — Self-Supervised LoRA Fine-Tuning on KITTI
+
+**Date:** 2026-03-30 (training in progress — 20 epochs)
+**Description:** Fine-tune Depth Pro with LoRA using photometric self-supervision on the KITTI Eigen training set. This is the primary thesis experiment.
+
+**Trainable parameters:**
+
+| Component | Parameters | % of Total |
+|-----------|-----------|------------|
+| LoRA (rank=8, 96 layers) | 2.36M | 0.24% |
+| Decoder (MultiresConvDecoder) | 19.67M | 2.04% |
+| Depth Head | 0.40M | 0.04% |
+| PoseNet (fresh) | 11.91M | 1.23% |
+| **Total trainable** | **34.33M** | **3.56%** |
+| Frozen | 932M | 96.4% |
+
+**v2 training run (failed — 16 wasted epochs):**
+- Bug: FOV head produced extreme `fov_deg` values on KITTI → NaN in canonical depth scaling → NaN total loss → GradScaler skipped every gradient update → zero learning
+- Bug: Auto-masking collapsed to 0.24 at epoch 4 (because model hadn't learned anything during warmup due to NaN loss)
+- Fix: Clamped `fov_deg` to [5°, 175°], clamped scale factor to [0.01, 100.0], added `nan_to_num` guards
+- Fix: Disabled auto-masking entirely (KITTI driving has constant camera motion; auto-masking is designed for stationary cameras)
+
+**v3 training run (current — fixes applied, started 2026-04-03):**
+- Training signals (epoch 1): `loss=0.19–0.21`, `mask=1.00`, no NaN — model is learning
+- Auto-masking: disabled
+- Step time: ~1.5s/step → ~5.5h/epoch → ~4.6 days total
+- Watcher script (`watch_and_eval.sh`) will auto-run GPU evaluation after training completes
+
+**Expected results:** *(to be filled after training)*
+
+| Metric | v6 Pretrained | v7 Self-Sup LoRA | Monodepth2 (ref) |
+|--------|--------------|-------------------|-------------------|
+| AbsRel (↓) | TBD | TBD | 0.115 |
+| SqRel (↓) | TBD | TBD | 0.903 |
+| RMSE (↓) | TBD | TBD | 4.863 |
+| δ<1.25 (↑) | TBD | TBD | 0.877 |
+
+---
+
+### 4.9 Key Engineering Challenges and Solutions
+
+#### Challenge 1: Canonical Inverse Depth Scaling
+
+Depth Pro outputs **canonical inverse depth** — a camera-agnostic representation normalized to be focal-length-independent. This is ideal for zero-shot generalization but geometrically incorrect for image warping, which requires actual metric depth in the camera's coordinate frame.
+
+**Solution:** Use the FOV head's predicted field of view to back-compute the focal length and scale the inverse depth:
+
+```python
+f_px = 0.5 * W / torch.tan(0.5 * torch.deg2rad(fov_deg))
+inv_depth_metric = canonical_inv_depth * (W / f_px)
+```
+
+Without this scaling, the warped reconstruction geometry is wrong (effective depth is off by a factor proportional to `f_px / W`), severely degrading the photometric signal.
+
+#### Challenge 2: Auto-Mask Collapse in Early Training
+
+In early training, the poorly initialized depth and pose networks produce warped images that are barely better than the identity (copying the source frame). Auto-masking compares warping error vs. identity error — if warping error ≥ identity error, the pixel is masked out.
+
+With poor initial predictions, almost all pixels get masked (auto-mask ratio → 0.1), leaving only 10% of pixels to provide gradient. This stalls learning.
+
+**Solution:** Disable auto-masking for the first 3 warmup epochs. The networks train on all pixels without masking, allowing them to learn meaningful geometry. After warmup, auto-masking is enabled when the warping quality is high enough to benefit from the occlusion handling.
+
+#### Challenge 3: FP16 NaN in Smoothness Loss
+
+The smoothness loss computes `e^{-|∂I/∂x|}` which requires exp(). Under FP16, gradients through this operation can overflow to NaN, especially early in training when depth values may be extreme.
+
+**Solution:** Cast to FP32 before computing smoothness, and clamp mean-normalized disparity to [0, 10]:
+
+```python
+inv_depth_f32 = inv_depth.float()
+mean_disp = inv_depth_f32 / (inv_depth_f32.mean(dim=[2,3], keepdim=True) + 1e-7)
+mean_disp = torch.clamp(mean_disp, 0, 10)
+s_loss = smooth_loss(mean_disp, target_img.float())
+```
+
+#### Challenge 4: VRAM Fitting with 952M Parameter Model
+
+Depth Pro's ViT encoders are 608M parameters, producing large intermediate activations. Running forward + backward with FP16 requires ~11GB+ of VRAM on a 12GB GPU.
+
+**Solution stack:**
+- Gradient checkpointing on both patch encoder and image encoder
+- FP16 mixed precision training with AMP GradScaler
+- Gradient accumulation (4 steps) to simulate larger batch size
+- PoseNet runs at 640×192 (vs 1536×1536 for depth) — 8× fewer pixels
+- LoRA constrains encoder gradients to low-rank matrices only
+
+#### Challenge 5: Dataset Redundancy at 10Hz
+
+KITTI records at 10Hz. At typical driving speeds, consecutive frames overlap by ~90%. Training on all consecutive triplets means the network sees nearly identical frames thousands of times per epoch, wasting compute.
+
+**Solution:** Stride=3 subsampling — use only every 3rd frame as the target (source frames are ±1 from the subsampled index, maintaining ~0.3s baseline). This reduces 39,810 training samples to 13,270 without meaningfully reducing scene coverage.
+
+---
+
+### 4.10 Planned Ablations and Future Experiments
+
+Once v7 baseline training completes, the following experiments are planned:
+
+#### Experiment v8 — Stereo Consistency Loss (if stereo pairs available)
+Add right-camera consistency loss (KITTI has synchronized stereo). Provides additional geometric supervision without labels. Expected: +2–4% AbsRel improvement.
+
+#### Experiment v9 — Multi-Scale Photometric Loss
+Compute photometric loss at multiple decoder output scales (1/1, 1/2, 1/4, 1/8) as in original Monodepth2. Provides denser gradient signal to earlier decoder layers.
+
+#### Experiment v10 — Longer Training / More Epochs
+Extend from 20 to 40 epochs with cosine annealing restart. Self-supervised methods typically benefit from longer training since the signal is weaker per sample.
+
+#### Experiment v11 — Different LoRA Ranks
+Ablate LoRA rank: rank=4 (1.18M params, half the params), rank=16 (4.72M params, double). Hypothesis: rank=8 is near-optimal for this task, but rank=4 may be sufficient with the weaker self-supervised signal.
+
+#### Experiment v12 — Depth Hints from LiDAR (Semi-Supervised)
+Sparse LiDAR hints as soft constraints during self-supervised training (not evaluation). Bridges gap between fully self-supervised and supervised approaches — a natural thesis extension.
+
+---
+
+## 5. Planned Improvements (Phase 1, NYU)
+
+*(These were planned after v0–v5 supervised experiments; now superseded by the Phase 2 self-supervised pivot.)*
 
 ### Phase 3: Training Data Expansion
 - Expand from 795 labeled images to ~25K-50K frames from the NYU raw dataset
 - More data is likely the biggest factor in the Apple paper's results
-- Expected to close the gap significantly — and would likely make v5's extra capacity beneficial
 
 ### Phase 4: Architectural Modifications
 - Add channel attention (SE blocks) to decoder fusion layers
@@ -383,10 +765,12 @@ where A is (rank × in_features) and B is (out_features × rank). Only A and B a
 
 ---
 
-## 5. Summary of All Results
+## 6. Summary of All Results
 
-| Experiment | AbsRel (↓) | RMSE (↓) | delta<1.25 (↑) | Key Change | vs Pretrained |
-|-----------|-----------|---------|---------------|------------|-------------|
+### Phase 1 — Supervised (NYU Depth V2, 654 Eigen test images, depth ≤ 10m)
+
+| Experiment | AbsRel (↓) | RMSE (↓) | δ<1.25 (↑) | Key Change | vs Pretrained |
+|-----------|-----------|---------|-----------|------------|-------------|
 | v0 Pretrained | 0.1155 | 0.5092 | 0.8777 | Zero-shot inference | — |
 | v1 Fine-tuned | 0.0855 | 0.3288 | 0.9389 | Train decoder+head (25ep) | +26.0% |
 | v2 + TTA Flip | 0.0790 | 0.3088 | 0.9532 | Flip TTA at inference | +31.6% |
@@ -397,28 +781,46 @@ where A is (rank × in_features) and B is (out_features × rank). Only A and B a
 | v5 LoRA+Unf+TTA | 0.0773 | 0.3014 | 0.9546 | + flip TTA | +33.1% |
 | Apple Paper | 0.036 | 0.127 | 0.989 | Full model, more data | target |
 
+### Phase 2 — Self-Supervised (KITTI Eigen test, 697 images, depth 1–80m, median scaling)
+
+| Experiment | AbsRel (↓) | SqRel (↓) | RMSE (↓) | δ<1.25 (↑) | Key Change | vs Pretrained |
+|-----------|-----------|----------|---------|-----------|------------|-------------|
+| v6 Pretrained | TBD | TBD | TBD | TBD | Zero-shot on KITTI | — |
+| **v7 Self-Sup LoRA** | **TBD** | **TBD** | **TBD** | **TBD** | **LoRA + photo loss (20ep)** | **TBD** |
+| Monodepth2 (ref) | 0.115 | 0.903 | 4.863 | 0.877 | Custom arch, 192×640 | — |
+| DIFFNet (ref) | 0.102 | 0.764 | 4.483 | 0.896 | Stronger backbone | — |
+
 ---
 
-## 6. Technical Notes
+## 7. Technical Notes
 
 ### GPU Memory Management
 - RTX 4070 Ti has 12GB VRAM
-- Model weights: ~3.8 GB (FP32)
+- Model weights: ~3.8 GB (FP32) / ~1.9 GB (FP16)
 - v1 decoder-only training: ~8.7 GB peak (FP16 mixed precision)
 - v4 LoRA training: ~10.9 GB peak (encoder gradients through LoRA + gradient checkpointing)
 - v5 LoRA + 2 unfrozen blocks: ~11.31 GB peak (additional MLP gradients)
+- v7 self-supervised: ~10.77 GB peak (Depth Pro + PoseNet + warping — PoseNet at 640×192 keeps overhead low)
 - Gradient accumulation (steps=4) enables effective batch size of 4 with batch_size=1
 - Gradient checkpointing on both encoders essential for LoRA training to fit in 12GB
 - Attempted 4 unfrozen blocks (67M params) → OOM; reduced to 2 blocks (56M) fits in 12GB
 
-### Evaluation Protocol
+### Evaluation Protocol — NYU Depth V2
 - Standard NYU Depth V2 Eigen test split (654 images)
-- Depth range capped to 0-10 meters (standard NYU protocol)
+- Depth range capped to 0–10 meters (standard NYU protocol)
 - Metrics: AbsRel, SqRel, RMSE, RMSElog, log10, delta thresholds (1.25, 1.25², 1.25³)
 - Scale-invariant metrics also computed (optimal per-image affine alignment)
 
+### Evaluation Protocol — KITTI Eigen
+- Standard Eigen test split (697 frames, fixed)
+- Velodyne LiDAR ground truth projected to camera using calibration matrices
+- Garg/Eigen crop: `[int(0.40810811 * h):int(0.99189189 * h), int(0.03594771 * w):int(0.96405229 * w)]`
+- Depth range: 1–80m (standard outdoor protocol)
+- Median scaling: `scale = median(gt_depth[gt_mask]) / median(pred_depth[gt_mask])`
+- Metrics: AbsRel, SqRel, RMSE, RMSE_log, δ<1.25, δ<1.25², δ<1.25³
+
 ### Reproducibility
 - All experiments tracked in `experiments/` with configs, results, and visualizations
-- Training logs saved as JSON in checkpoint directories
+- Training logs saved in `checkpoints/` with per-epoch metrics
 - Random seeds fixed for reproducibility
 - Code available at: github.com/Dariusan3/ml-depth-pro

@@ -90,6 +90,7 @@ def compute_selfsup_loss(
     warped_imgs: list[torch.Tensor],
     inv_depth: torch.Tensor,
     smoothness_weight: float = 1e-3,
+    auto_mask: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Compute the full self-supervised loss with auto-masking.
 
@@ -102,6 +103,7 @@ def compute_selfsup_loss(
         warped_imgs: List of (B, 3, H, W) warped source images.
         inv_depth: (B, 1, H, W) predicted inverse depth (disparity).
         smoothness_weight: Weight for smoothness loss (default 1e-3).
+        auto_mask: Whether to apply auto-masking (disable early in training).
 
     Returns:
         Dict with 'total', 'photometric', 'smoothness' losses.
@@ -115,25 +117,34 @@ def compute_selfsup_loss(
     reproj_loss = torch.cat(reproj_losses, dim=1)  # (B, N_sources, H, W)
     min_reproj, _ = reproj_loss.min(dim=1, keepdim=True)  # (B, 1, H, W)
 
-    # Auto-masking: compute identity photometric loss (unwarped source vs target)
-    identity_losses = []
-    for source in source_imgs:
-        identity_losses.append(photometric_loss(source, target_img))
-    identity_loss = torch.cat(identity_losses, dim=1)
-    min_identity, _ = identity_loss.min(dim=1, keepdim=True)
+    if auto_mask:
+        # Auto-masking: compute identity photometric loss (unwarped source vs target)
+        identity_losses = []
+        for source in source_imgs:
+            identity_losses.append(photometric_loss(source, target_img))
+        identity_loss = torch.cat(identity_losses, dim=1)
+        min_identity, _ = identity_loss.min(dim=1, keepdim=True)
 
-    # Add random noise to break ties (Monodepth2 trick)
-    min_identity = min_identity + torch.randn_like(min_identity) * 1e-5
+        # Add random noise to break ties (Monodepth2 trick)
+        min_identity = min_identity + torch.randn_like(min_identity) * 1e-5
 
-    # Auto-mask: only supervise pixels where warping improves over identity
-    auto_mask = (min_reproj < min_identity).float()
+        # Auto-mask: only supervise pixels where warping improves over identity
+        mask = (min_reproj < min_identity).float()
+        photo_loss = (mask * min_reproj).sum() / (mask.sum() + 1e-7)
+        mask_ratio = mask.mean()
+    else:
+        photo_loss = min_reproj.mean()
+        mask_ratio = torch.ones(1, device=inv_depth.device)
 
-    # Masked photometric loss
-    photo_loss = (auto_mask * min_reproj).sum() / (auto_mask.sum() + 1e-7)
-
-    # Edge-aware smoothness on mean-normalized disparity
-    mean_disp = inv_depth / (inv_depth.mean(dim=[2, 3], keepdim=True) + 1e-7)
-    s_loss = smooth_loss(mean_disp, target_img)
+    # Edge-aware smoothness on mean-normalized disparity (compute in FP32 to avoid NaN)
+    inv_depth_f32 = inv_depth.float()
+    inv_depth_f32 = torch.nan_to_num(inv_depth_f32, nan=1.0, posinf=10.0, neginf=1e-6)
+    target_f32 = target_img.float()
+    mean_disp = inv_depth_f32 / (inv_depth_f32.mean(dim=[2, 3], keepdim=True) + 1e-7)
+    mean_disp = torch.clamp(mean_disp, 0, 10)  # prevent extreme values
+    s_loss = smooth_loss(mean_disp, target_f32)
+    if not torch.isfinite(s_loss):
+        s_loss = torch.zeros(1, device=inv_depth.device, dtype=torch.float32).squeeze()
 
     total = photo_loss + smoothness_weight * s_loss
 
@@ -141,5 +152,5 @@ def compute_selfsup_loss(
         "total": total,
         "photometric": photo_loss,
         "smoothness": s_loss,
-        "auto_mask_ratio": auto_mask.mean(),
+        "auto_mask_ratio": mask_ratio,
     }

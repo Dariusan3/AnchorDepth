@@ -35,6 +35,7 @@ class KITTIRawDataset(Dataset):
         pose_size: tuple[int, int] = (640, 192),
         is_train: bool = True,
         frame_ids: tuple[int, ...] = (-1, 0, 1),
+        stride: int = 1,
     ):
         """Initialize KITTI dataset.
 
@@ -45,6 +46,7 @@ class KITTIRawDataset(Dataset):
             pose_size: (W, H) for PoseNet / loss computation.
             is_train: Whether to apply color augmentation.
             frame_ids: Frame offsets to load (default: previous, current, next).
+            stride: Use every Nth sample (reduces redundancy for 10Hz video).
         """
         self.data_path = Path(data_path)
         self.depth_size = depth_size  # (W, H)
@@ -61,6 +63,10 @@ class KITTIRawDataset(Dataset):
                 frame_idx = int(parts[1])
                 side = parts[2]  # 'l' or 'r'
                 self.filenames.append((folder, frame_idx, side))
+
+        # Subsample to reduce redundancy (KITTI is 10Hz video)
+        if stride > 1:
+            self.filenames = self.filenames[::stride]
 
         # Depth Pro normalization
         self.depth_pro_normalize = transforms.Normalize(
@@ -153,18 +159,24 @@ class KITTIRawDataset(Dataset):
 
         # Apply consistent color augmentation to all frames
         if self.is_train and self.color_aug is not None and random.random() > 0.5:
-            # Get augmentation parameters once, apply to all frames
-            aug_params = self.color_aug.get_params(
+            # get_params returns (fn_order, brightness, contrast, saturation, hue)
+            fn_idx, b_factor, c_factor, s_factor, h_factor = self.color_aug.get_params(
                 self.color_aug.brightness,
                 self.color_aug.contrast,
                 self.color_aug.saturation,
                 self.color_aug.hue,
             )
+            # Apply in the randomized order, identically to all frames
             for fid in self.frame_ids:
-                images[fid] = transforms.functional.adjust_brightness(images[fid], aug_params[0])
-                images[fid] = transforms.functional.adjust_contrast(images[fid], aug_params[1])
-                images[fid] = transforms.functional.adjust_saturation(images[fid], aug_params[2])
-                images[fid] = transforms.functional.adjust_hue(images[fid], aug_params[3])
+                for fn_id in fn_idx:
+                    if fn_id == 0:
+                        images[fid] = transforms.functional.adjust_brightness(images[fid], b_factor)
+                    elif fn_id == 1:
+                        images[fid] = transforms.functional.adjust_contrast(images[fid], c_factor)
+                    elif fn_id == 2:
+                        images[fid] = transforms.functional.adjust_saturation(images[fid], s_factor)
+                    elif fn_id == 3:
+                        images[fid] = transforms.functional.adjust_hue(images[fid], h_factor)
 
         # Horizontal flip augmentation
         do_flip = self.is_train and random.random() > 0.5

@@ -1,0 +1,14 @@
+[
+  {
+    "epoch": 1,
+    "train_loss": 0.18887385763321304,
+    "train_photometric": 0.1888538250760327,
+    "train_smoothness": 0.020032549510362156,
+    "auto_mask_ratio": 1.0,
+    "lr_lora": 1e-06,
+    "lr_depth": 1e-06,
+    "lr_pose": 1e-06,
+    "epoch_time": 604.7736082077026,
+    "val_photometric": 0.1588509601023462
+  }
+]

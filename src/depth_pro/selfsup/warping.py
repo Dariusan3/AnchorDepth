@@ -83,12 +83,13 @@ class Project3D(nn.Module):
         # Project: divide by depth (z-coordinate)
         pix_coords = P[:, :2, :] / (P[:, 2:3, :] + 1e-7)  # (B, 2, H*W)
 
-        # Normalize to [-1, 1] for grid_sample
+        # Normalize to [-1, 1] for grid_sample (out-of-place to preserve autograd)
         pix_coords = pix_coords.view(B, 2, self.height, self.width)
         pix_coords = pix_coords.permute(0, 2, 3, 1)  # (B, H, W, 2)
 
-        pix_coords[..., 0] = pix_coords[..., 0] / (self.width - 1) * 2 - 1
-        pix_coords[..., 1] = pix_coords[..., 1] / (self.height - 1) * 2 - 1
+        norm_u = pix_coords[..., 0] / (self.width - 1) * 2 - 1
+        norm_v = pix_coords[..., 1] / (self.height - 1) * 2 - 1
+        pix_coords = torch.stack([norm_u, norm_v], dim=-1)
 
         return pix_coords
 
