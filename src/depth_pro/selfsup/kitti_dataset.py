@@ -36,6 +36,7 @@ class KITTIRawDataset(Dataset):
         is_train: bool = True,
         frame_ids: tuple[int, ...] = (-1, 0, 1),
         stride: int = 1,
+        vggt_poses: Optional[dict] = None,
     ):
         """Initialize KITTI dataset.
 
@@ -47,6 +48,9 @@ class KITTIRawDataset(Dataset):
             is_train: Whether to apply color augmentation.
             frame_ids: Frame offsets to load (default: previous, current, next).
             stride: Use every Nth sample (reduces redundancy for 10Hz video).
+            vggt_poses: Optional dict {sample_idx: {"T_prev": [4,4], "T_next": [4,4]}}
+                        precomputed by precompute_vggt_poses.py. When provided,
+                        horizontal flip is disabled to keep poses consistent.
         """
         self.data_path = Path(data_path)
         self.depth_size = depth_size  # (W, H)
@@ -67,6 +71,9 @@ class KITTIRawDataset(Dataset):
         # Subsample to reduce redundancy (KITTI is 10Hz video)
         if stride > 1:
             self.filenames = self.filenames[::stride]
+
+        # Optional precomputed VGGT poses (replaces PoseNet)
+        self.vggt_poses = vggt_poses  # {idx: {"T_prev": [4,4], "T_next": [4,4]}}
 
         # Depth Pro normalization
         self.depth_pro_normalize = transforms.Normalize(
@@ -178,8 +185,9 @@ class KITTIRawDataset(Dataset):
                     elif fn_id == 3:
                         images[fid] = transforms.functional.adjust_hue(images[fid], h_factor)
 
-        # Horizontal flip augmentation
-        do_flip = self.is_train and random.random() > 0.5
+        # Horizontal flip augmentation — disabled when using VGGT poses
+        # (precomputed poses correspond to the un-flipped image geometry)
+        do_flip = self.is_train and self.vggt_poses is None and random.random() > 0.5
 
         result = {}
 
@@ -214,6 +222,12 @@ class KITTIRawDataset(Dataset):
 
         result["K"] = torch.from_numpy(K_scaled)
         result["inv_K"] = torch.from_numpy(np.linalg.inv(K_scaled))
+
+        # Add precomputed VGGT poses if available
+        if self.vggt_poses is not None and index in self.vggt_poses:
+            entry = self.vggt_poses[index]
+            result["T_prev"] = entry["T_prev"].float()  # [4, 4] target→prev
+            result["T_next"] = entry["T_next"].float()  # [4, 4] target→next
 
         return result
 

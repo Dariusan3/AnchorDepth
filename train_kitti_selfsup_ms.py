@@ -19,7 +19,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -48,7 +47,8 @@ def train_one_epoch(
 ):
     """Train one epoch of self-supervised depth estimation."""
     model.train()
-    pose_net.train()
+    if pose_net is not None:
+        pose_net.train()
 
     # Keep FOV head in eval mode (frozen)
     if hasattr(model, "fov"):
@@ -73,7 +73,7 @@ def train_one_epoch(
 
         pose_h, pose_w = target_img.shape[2], target_img.shape[3]
 
-        with torch.amp.autocast("cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             # 1. Single-scale depth prediction (multi-scale VRAM constrained on 12GB)
             encodings = model.encoder(target_depth_input)
             features, _ = model.decoder(encodings)
@@ -89,14 +89,20 @@ def train_one_epoch(
             inv_depth = F.relu(inv_depth) + 1e-6
             depth = 1.0 / torch.clamp(inv_depth, min=1e-4, max=1e4)
 
-            # 2. Predict ego-motion
-            pose_target = normalize_imagenet(target_img)
-            pose_prev_n = normalize_imagenet(source_prev)
-            pose_next_n = normalize_imagenet(source_next)
-            pose_vec_prev = pose_net(pose_target, pose_prev_n)
-            pose_vec_next = pose_net(pose_target, pose_next_n)
-            T_prev = pose_vec_to_matrix(pose_vec_prev[:, :3], pose_vec_prev[:, 3:])
-            T_next = pose_vec_to_matrix(pose_vec_next[:, :3], pose_vec_next[:, 3:])
+            # 2. Predict ego-motion (PoseNet or precomputed VGGT poses)
+            if "T_prev" in batch:
+                # Use precomputed VGGT poses — no PoseNet inference needed
+                T_prev = batch["T_prev"].to(device)  # (B, 4, 4)
+                T_next = batch["T_next"].to(device)  # (B, 4, 4)
+                pose_vec_prev = None  # not used below
+            else:
+                pose_target = normalize_imagenet(target_img)
+                pose_prev_n = normalize_imagenet(source_prev)
+                pose_next_n = normalize_imagenet(source_next)
+                pose_vec_prev = pose_net(pose_target, pose_prev_n)
+                pose_vec_next = pose_net(pose_target, pose_next_n)
+                T_prev = pose_vec_to_matrix(pose_vec_prev[:, :3], pose_vec_prev[:, 3:])
+                T_next = pose_vec_to_matrix(pose_vec_next[:, :3], pose_vec_next[:, 3:])
 
             # 3. Warp and compute photometric loss
             warped_prev = warper(source_prev, depth, T_prev, K, inv_K)
@@ -112,15 +118,25 @@ def train_one_epoch(
             del warped_prev, warped_next
             loss = losses["total"] / grad_accum_steps
 
+        # Skip step if loss is non-finite (prevents NaN from propagating)
+        if not torch.isfinite(loss):
+            optimizer.zero_grad()
+            continue
+
         scaler.scale(loss).backward()
 
         if (step + 1) % grad_accum_steps == 0:
             scaler.unscale_(optimizer)
-            # Clip gradients for both networks
-            all_params = (
-                [p for p in model.parameters() if p.requires_grad]
-                + list(pose_net.parameters())
-            )
+
+            # Sanitize LoRA gradients — zero out any NaN/Inf
+            for _, param in model.named_parameters():
+                if param.grad is not None and not torch.isfinite(param.grad).all():
+                    param.grad[~torch.isfinite(param.grad)] = 0.0
+
+            # Clip gradients (PoseNet excluded when using VGGT poses)
+            all_params = [p for p in model.parameters() if p.requires_grad]
+            if pose_net is not None:
+                all_params += list(pose_net.parameters())
             torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
@@ -138,11 +154,11 @@ def train_one_epoch(
             with torch.no_grad():
                 depth_mean = depth.mean().item()
                 depth_std = depth.std().item()
-                pose_mag = pose_vec_prev[:, 3:].norm(dim=-1).mean().item()
+                pose_mag = T_prev[:, :3, 3].norm(dim=-1).mean().item()
                 scale_val = scale_factor.mean().item()
             wandb.log({
-                "step/loss": losses["total"].item(),
-                "step/photometric": losses["photometric"].item(),
+                "losses/total": losses["total"].item(),
+                "losses/photometric_loss": losses["photometric"].item(),
                 "step/depth_mean_m": depth_mean,
                 "step/depth_std_m": depth_std,
                 "step/pose_translation_norm": pose_mag,
@@ -179,30 +195,36 @@ def normalize_imagenet(x: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def validate_selfsup(model, pose_net, warper, val_loader, device):
-    """Validate using photometric reconstruction quality."""
+def validate_selfsup(model, pose_net, warper, val_loader, device,
+                     use_wandb=False, epoch=0,
+                     gt_eval_split=None, gt_eval_data_path=None, gt_eval_n=50):
+    """Validate using photometric loss + lightweight GT depth metrics + depth visualizations.
+
+    GT metrics (abs_rel, delta1, etc.) are computed on gt_eval_n test images when
+    gt_eval_split is provided. Uses one image at a time to minimise VRAM overhead.
+    """
     model.eval()
-    pose_net.eval()
+    if pose_net is not None:
+        pose_net.eval()
 
     total_photo = 0.0
     count = 0
+    depth_imgs = []
 
     for batch in tqdm(val_loader, desc="Validation"):
         target_depth_input = batch["target_depth"].to(device)
-        target_img = batch["target"].to(device)
-        source_prev = batch["source_-1"].to(device)
-        source_next = batch["source_1"].to(device)
-        K = batch["K"].to(device)
-        inv_K = batch["inv_K"].to(device)
+        target_img         = batch["target"].to(device)
+        source_prev        = batch["source_-1"].to(device)
+        source_next        = batch["source_1"].to(device)
+        K                  = batch["K"].to(device)
+        inv_K              = batch["inv_K"].to(device)
 
         pose_h, pose_w = target_img.shape[2], target_img.shape[3]
 
-        with torch.amp.autocast("cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             canonical_inv_depth, _ = model(target_depth_input)
-            inv_depth = F.interpolate(
-                canonical_inv_depth, size=(pose_h, pose_w),
-                mode="bilinear", align_corners=False,
-            )
+            inv_depth = F.interpolate(canonical_inv_depth, size=(pose_h, pose_w),
+                                      mode="bilinear", align_corners=False)
             f_px = batch["K"][:, 0, 0].to(device).to(torch.float)
             scale = torch.clamp((pose_w / f_px).view(-1, 1, 1, 1), min=0.01, max=100.0)
             inv_depth = inv_depth * scale
@@ -210,19 +232,20 @@ def validate_selfsup(model, pose_net, warper, val_loader, device):
             inv_depth = F.relu(inv_depth) + 1e-6
             depth = 1.0 / torch.clamp(inv_depth, min=1e-4, max=1e4)
 
-            pose_target = normalize_imagenet(target_img)
-            pose_prev = normalize_imagenet(source_prev)
-            pose_next = normalize_imagenet(source_next)
-
-            pose_vec_prev = pose_net(pose_target, pose_prev)
-            pose_vec_next = pose_net(pose_target, pose_next)
-
-            T_prev = pose_vec_to_matrix(pose_vec_prev[:, :3], pose_vec_prev[:, 3:])
-            T_next = pose_vec_to_matrix(pose_vec_next[:, :3], pose_vec_next[:, 3:])
+            if "T_prev" in batch:
+                T_prev = batch["T_prev"].to(device)
+                T_next = batch["T_next"].to(device)
+            else:
+                pt = normalize_imagenet(target_img)
+                pp = normalize_imagenet(source_prev)
+                pn = normalize_imagenet(source_next)
+                vp = pose_net(pt, pp)
+                vn = pose_net(pt, pn)
+                T_prev = pose_vec_to_matrix(vp[:, :3], vp[:, 3:])
+                T_next = pose_vec_to_matrix(vn[:, :3], vn[:, 3:])
 
             warped_prev = warper(source_prev, depth, T_prev, K, inv_K)
             warped_next = warper(source_next, depth, T_next, K, inv_K)
-
             losses = compute_selfsup_loss(
                 target_img, [source_prev, source_next],
                 [warped_prev, warped_next], inv_depth,
@@ -231,7 +254,127 @@ def validate_selfsup(model, pose_net, warper, val_loader, device):
         total_photo += losses["photometric"].item()
         count += 1
 
-    return {"val_photometric": total_photo / max(count, 1)}
+        if use_wandb and len(depth_imgs) < 8:
+            d = depth[0, 0].cpu().float().numpy()
+            d_norm = (d - d.min()) / (d.max() - d.min() + 1e-8)
+            depth_imgs.append(wandb.Image(d_norm, caption=f"epoch {epoch}"))
+
+    metrics = {"val_photometric": total_photo / max(count, 1)}
+    metrics["depth_images"] = depth_imgs
+
+    # ── Lightweight GT evaluation on a small subset of the test split ──────────
+    if gt_eval_split and gt_eval_data_path and Path(gt_eval_split).exists():
+        from PIL import Image as PILImage
+        from torchvision.transforms import ToTensor, Normalize as TvNorm
+        import numpy as np
+
+        normalize_dp = TvNorm([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        to_tensor    = ToTensor()
+
+        # Parse test split
+        filenames = []
+        with open(gt_eval_split) as f:
+            for line in f:
+                parts = line.strip().split()
+                filenames.append((parts[0], int(parts[1]), parts[2]))
+
+        # Evenly-spaced subset
+        step = max(1, len(filenames) // gt_eval_n)
+        subset = filenames[::step][:gt_eval_n]
+
+        abs_rels, delta1s, rmses, log_rmses, sq_rels, delta2s, delta3s = [], [], [], [], [], [], []
+        data_path = Path(gt_eval_data_path)
+
+        for folder, frame_idx, side in subset:
+            cam = "image_02" if side == "l" else "image_03"
+            img_path  = data_path / folder / cam / "data" / f"{frame_idx:010d}.png"
+            date      = folder.split("/")[0]
+            drive     = folder.split("/")[1]
+            velo_path = data_path / date / drive / "velodyne_points" / "data" / f"{frame_idx:010d}.bin"
+            if not img_path.exists() or not velo_path.exists():
+                continue
+
+            img      = PILImage.open(img_path).convert("RGB")
+            orig_w, orig_h = img.size
+            img_1536 = img.resize((1536, 1536), PILImage.LANCZOS)
+            inp      = normalize_dp(to_tensor(img_1536)).unsqueeze(0).to(device)
+
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                canon, _ = model(inp)
+                depth_pred = 1.0 / torch.clamp(canon, min=1e-4, max=1e4)
+
+            pred_np = depth_pred.squeeze().cpu().float().numpy()
+            # Resize to original
+            pred_np = np.array(PILImage.fromarray(pred_np).resize((orig_w, orig_h), PILImage.BILINEAR))
+
+            # Load LiDAR GT (reuse evaluate_kitti helpers via inline code)
+            velo = np.fromfile(str(velo_path), dtype=np.float32).reshape(-1, 4)[:, :3]
+            calib = {}
+            for name in ["calib_cam_to_cam.txt", "calib_velo_to_cam.txt"]:
+                with open(data_path / date / name) as cf:
+                    for line in cf:
+                        if ":" in line:
+                            k2, v2 = line.split(":", 1)
+                            calib[k2.strip()] = v2.strip()
+            P2      = np.array(calib["P_rect_02"].split(), np.float32).reshape(3, 4)
+            R_rect  = np.eye(4, dtype=np.float32)
+            R_rect[:3, :3] = np.array(calib["R_rect_00"].split(), np.float32).reshape(3, 3)
+            Tr      = np.eye(4, dtype=np.float32)
+            Tr[:3, :3] = np.array(calib["R"].split(), np.float32).reshape(3, 3)
+            Tr[:3, 3]  = np.array(calib["T"].split(), np.float32)
+
+            pts_hom = np.hstack([velo, np.ones((len(velo), 1), np.float32)])
+            pts_cam = (P2 @ R_rect @ Tr @ pts_hom.T).T
+            mask    = pts_cam[:, 2] > 0
+            pts_cam = pts_cam[mask]
+            pts_2d  = pts_cam[:, :2] / pts_cam[:, 2:3]
+            depths  = pts_cam[:, 2]
+            mask2   = ((pts_2d[:,0]>=0)&(pts_2d[:,0]<orig_w)&
+                       (pts_2d[:,1]>=0)&(pts_2d[:,1]<orig_h))
+            pts_2d  = pts_2d[mask2]; depths = depths[mask2]
+            gt_map  = np.zeros((orig_h, orig_w), np.float32)
+            u = np.clip(np.round(pts_2d[:,0]).astype(int), 0, orig_w-1)
+            v = np.clip(np.round(pts_2d[:,1]).astype(int), 0, orig_h-1)
+            for i in range(len(u)):
+                if gt_map[v[i],u[i]] == 0 or depths[i] < gt_map[v[i],u[i]]:
+                    gt_map[v[i],u[i]] = depths[i]
+
+            # Garg crop
+            h, w = orig_h, orig_w
+            r0,r1 = int(0.40810811*h), int(0.99189189*h)
+            c0,c1 = int(0.03594771*w), int(0.96405229*w)
+            gt_c   = gt_map[r0:r1, c0:c1]
+            pred_c = pred_np[r0:r1, c0:c1]
+
+            valid = (gt_c > 1e-3) & (gt_c < 80.0)
+            if valid.sum() < 10:
+                continue
+            gt_v   = gt_c[valid]
+            pred_v = pred_c[valid]
+            scale  = np.median(gt_v) / (np.median(pred_v) + 1e-8)
+            pred_v = np.clip(pred_v * scale, 1e-3, 80.0)
+
+            thresh = np.maximum(pred_v / gt_v, gt_v / pred_v)
+            abs_rels.append(float(np.mean(np.abs(pred_v - gt_v) / gt_v)))
+            sq_rels.append(float(np.mean((pred_v - gt_v)**2 / gt_v)))
+            rmses.append(float(np.sqrt(np.mean((pred_v - gt_v)**2))))
+            log_rmses.append(float(np.sqrt(np.mean((np.log(pred_v) - np.log(gt_v))**2))))
+            delta1s.append(float(np.mean(thresh < 1.25)))
+            delta2s.append(float(np.mean(thresh < 1.25**2)))
+            delta3s.append(float(np.mean(thresh < 1.25**3)))
+
+            torch.cuda.empty_cache()
+
+        if abs_rels:
+            metrics["abs_rel"]  = float(np.mean(abs_rels))
+            metrics["sq_rel"]   = float(np.mean(sq_rels))
+            metrics["rms"]      = float(np.mean(rmses))
+            metrics["log_rms"]  = float(np.mean(log_rmses))
+            metrics["a1"]       = float(np.mean(delta1s))
+            metrics["a2"]       = float(np.mean(delta2s))
+            metrics["a3"]       = float(np.mean(delta3s))
+
+    return metrics
 
 
 def main():
@@ -240,6 +383,8 @@ def main():
     parser.add_argument("--train-split", type=str, default="splits/eigen_train_files.txt")
     parser.add_argument("--val-split", type=str, default="splits/eigen_val_files.txt")
     parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume from (loads model+pose weights)")
     parser.add_argument("--lr-depth", type=float, default=1e-4,
                         help="LR for decoder + head")
     parser.add_argument("--lr-lora", type=float, default=1e-5,
@@ -252,7 +397,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--smoothness-weight", type=float, default=1e-3)
-    parser.add_argument("--pose-size", type=str, default="512x160",
+    parser.add_argument("--pose-size", type=str, default="416x128",
                         help="WxH for PoseNet input")
     parser.add_argument("--stride", type=int, default=3,
                         help="Use every Nth training sample (KITTI 10Hz is redundant)")
@@ -263,6 +408,9 @@ def main():
     parser.add_argument("--no-wandb", action="store_true", help="Disable WandB logging")
     parser.add_argument("--wandb-project", type=str, default="depth-pro-selfsup")
     parser.add_argument("--wandb-name", type=str, default="v6-multiscale-40ep")
+    parser.add_argument("--vggt-poses", type=str, default=None,
+                        help="Path to precomputed VGGT poses (.pt file from precompute_vggt_poses.py). "
+                             "Replaces PoseNet with high-quality VGGT ego-motion estimates.")
     args = parser.parse_args()
 
     pose_w, pose_h = [int(x) for x in args.pose_size.split("x")]
@@ -366,12 +514,18 @@ def main():
         print("Enabled gradient checkpointing for image encoder")
 
     # ================================================================
-    # Create PoseNet
+    # Create PoseNet (skipped when using precomputed VGGT poses)
     # ================================================================
-    print("\nCreating PoseNet...")
-    pose_net = PoseNet().to(device)
-    pose_params = sum(p.numel() for p in pose_net.parameters())
-    print(f"PoseNet parameters: {pose_params/1e6:.2f}M")
+    if args.vggt_poses:
+        print(f"\nUsing precomputed VGGT poses from: {args.vggt_poses}")
+        print("PoseNet: DISABLED (replaced by VGGT)")
+        pose_net = None
+        pose_params = 0
+    else:
+        print("\nCreating PoseNet (ResNet-18)...")
+        pose_net = PoseNet().to(device)
+        pose_params = sum(p.numel() for p in pose_net.parameters())
+        print(f"PoseNet parameters: {pose_params/1e6:.2f}M")
 
     # ================================================================
     # Create Warper
@@ -396,6 +550,18 @@ def main():
     print(f"  Total:    {total_trainable/1e6:.2f}M / {total_params/1e6:.1f}M")
 
     # ================================================================
+    # Resume from checkpoint (loads weights, fresh optimizer)
+    # ================================================================
+    if args.resume:
+        print(f"\nResuming from checkpoint: {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["depth_model"], strict=False)
+        if pose_net is not None and "pose_net" in ckpt:
+            pose_net.load_state_dict(ckpt["pose_net"])
+        resumed_epoch = ckpt.get("epoch", 0)
+        print(f"  Loaded weights from epoch {resumed_epoch}")
+
+    # ================================================================
     # VRAM optimization
     # ================================================================
     torch.cuda.empty_cache()
@@ -405,6 +571,12 @@ def main():
     # Dataset
     # ================================================================
     print(f"\nLoading KITTI dataset from {args.data_path}...")
+    vggt_poses = None
+    if args.vggt_poses:
+        print(f"Loading precomputed VGGT poses from {args.vggt_poses}...")
+        vggt_poses = torch.load(args.vggt_poses, map_location="cpu")
+        print(f"  Loaded {len(vggt_poses)} pose entries.")
+
     train_dataset = KITTIRawDataset(
         data_path=args.data_path,
         split_file=args.train_split,
@@ -412,6 +584,7 @@ def main():
         pose_size=(pose_w, pose_h),
         is_train=True,
         stride=args.stride,
+        vggt_poses=vggt_poses,
     )
     val_dataset = KITTIRawDataset(
         data_path=args.data_path,
@@ -444,13 +617,14 @@ def main():
     param_groups = [
         {"params": lora_params, "lr": args.lr_lora, "weight_decay": 0.01},
         {"params": decoder_head_params, "lr": args.lr_depth, "weight_decay": 1e-4},
-        {"params": list(pose_net.parameters()), "lr": args.lr_pose, "weight_decay": 0.0},
+        {"params": list(pose_net.parameters()) if pose_net is not None else [], "lr": args.lr_pose, "weight_decay": 0.0},
     ]
     optimizer = torch.optim.AdamW(param_groups)
 
-    # Cosine annealing after warmup
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs - args.warmup_epochs, eta_min=1e-6,
+    # Cosine annealing with warm restarts — LR cycles every 10 epochs
+    # so it never decays to near-zero and keeps escaping plateaus.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=10, T_mult=1, eta_min=1e-6,  # type: ignore[arg-type]
     )
 
     scaler = torch.amp.GradScaler("cuda")
@@ -515,65 +689,89 @@ def main():
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             val_metrics = validate_selfsup(
                 model, pose_net, warper, val_loader, device,
+                use_wandb=use_wandb, epoch=epoch,
+                gt_eval_split="splits/eigen_test_files.txt",
+                gt_eval_data_path=args.data_path,
+                gt_eval_n=50,
             )
-            log_entry.update(val_metrics)
+            log_entry.update({k: v for k, v in val_metrics.items() if k != "depth_images"})
 
+            abs_rel_str = f" | abs_rel: {val_metrics['abs_rel']:.4f}" if "abs_rel" in val_metrics else ""
             print(
                 f"Epoch {epoch}/{args.epochs} | "
                 f"loss: {train_metrics['loss']:.4f} | "
                 f"photo: {train_metrics['photometric']:.4f} | "
-                f"val_photo: {val_metrics['val_photometric']:.4f} | "
-                f"mask: {train_metrics['auto_mask_ratio']:.2f} | "
+                f"val_photo: {val_metrics['val_photometric']:.4f}"
+                f"{abs_rel_str} | "
                 f"time: {epoch_time:.1f}s | ETA: {eta/60:.1f}min"
             )
 
             if val_metrics["val_photometric"] < best_photo_loss:
                 best_photo_loss = val_metrics["val_photometric"]
-                # Save both depth model and pose network
-                save_dict = {
-                    "depth_model": model.state_dict(),
-                    "pose_net": pose_net.state_dict(),
-                    "epoch": epoch,
-                    "val_photometric": best_photo_loss,
-                }
-                torch.save(save_dict, save_dir / "selfsup_best.pt")
-                print(f"  -> Saved best model (val_photo: {best_photo_loss:.4f})")
+                sd = model.state_dict()
+                nan_keys = [k for k, v in sd.items() if v.is_floating_point() and not torch.isfinite(v).all()]
+                if nan_keys:
+                    print(f"  !! SKIPPED save — {len(nan_keys)} params have NaN/Inf (LoRA diverged)")
+                else:
+                    save_dict = {
+                        "depth_model": sd,
+                        "pose_net": pose_net.state_dict() if pose_net is not None else {},
+                        "epoch": epoch,
+                        "val_photometric": best_photo_loss,
+                    }
+                    torch.save(save_dict, save_dir / "selfsup_best.pt")
+                    print(f"  -> Saved best model (val_photo: {best_photo_loss:.4f})")
         else:
+            val_metrics = {}
             print(
                 f"Epoch {epoch}/{args.epochs} | "
                 f"loss: {train_metrics['loss']:.4f} | "
                 f"photo: {train_metrics['photometric']:.4f} | "
-                f"mask: {train_metrics['auto_mask_ratio']:.2f} | "
                 f"time: {epoch_time:.1f}s | ETA: {eta/60:.1f}min"
             )
 
-        # WandB logging
+        # WandB logging — matches naming convention from screenshots
         if use_wandb:
             wandb_log = {
                 "epoch": epoch,
-                "train/loss": train_metrics["loss"],
-                "train/photometric": train_metrics["photometric"],
-                "train/smoothness": train_metrics["smoothness"],
-                "train/auto_mask_ratio": train_metrics["auto_mask_ratio"],
+                "losses/photometric_loss": train_metrics["photometric"],
+                "losses/total": train_metrics["loss"],
+                "losses/smoothness": train_metrics["smoothness"],
                 "lr/lora": optimizer.param_groups[0]["lr"],
                 "lr/depth": optimizer.param_groups[1]["lr"],
                 "lr/pose": optimizer.param_groups[2]["lr"],
                 "epoch_time_s": epoch_time,
             }
-            if "val_photometric" in log_entry:
-                wandb_log["val/photometric"] = log_entry["val_photometric"]
+            if val_metrics:
+                wandb_log["losses/val_photometric"] = val_metrics.get("val_photometric", 0)
+                # Standard depth metrics
+                for k in ["abs_rel", "sq_rel", "rms", "log_rms"]:
+                    if k in val_metrics:
+                        wandb_log[f"standard_metrics/{k}"] = val_metrics[k]
+                # Threshold metrics
+                for k in ["a1", "a2", "a3"]:
+                    if k in val_metrics:
+                        wandb_log[f"threshold_metrics/{k}"] = val_metrics[k]
+                # Depth map visualizations
+                if val_metrics.get("depth_images"):
+                    wandb_log["predicted_depth"] = val_metrics["depth_images"]
             wandb.log(wandb_log, step=epoch)
 
         training_log.append(log_entry)
         torch.cuda.empty_cache()
 
-    # Save final model and log
-    save_dict = {
-        "depth_model": model.state_dict(),
-        "pose_net": pose_net.state_dict(),
-        "epoch": args.epochs,
-    }
-    torch.save(save_dict, save_dir / "selfsup_final.pt")
+    # Save final model (with NaN check)
+    final_sd = model.state_dict()
+    nan_keys = [k for k, v in final_sd.items() if v.is_floating_point() and not torch.isfinite(v).all()]
+    if nan_keys:
+        print(f"WARNING: {len(nan_keys)} params have NaN — final model NOT saved")
+    else:
+        save_dict = {
+            "depth_model": final_sd,
+            "pose_net": pose_net.state_dict() if pose_net is not None else {},
+            "epoch": args.epochs,
+        }
+        torch.save(save_dict, save_dir / "selfsup_final.pt")
 
     log_path = save_dir / "training_log_selfsup.json"
     with open(log_path, "w") as f:

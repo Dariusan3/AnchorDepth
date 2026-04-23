@@ -74,7 +74,6 @@ class LoRALinear(nn.Module):
             self.original.bias.requires_grad = False
 
     def forward(self, x):
-        # Original output + low-rank adaptation
         result = self.original(x)
         lora_out = F.linear(F.linear(x, self.lora_A), self.lora_B) * self.scaling
         return result + lora_out

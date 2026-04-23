@@ -25,3 +25,11 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# WandB run logs (auto-generated, large)
+wandb/
+
+# Ephemeral training state
+checkpoints/*.pid
+checkpoints/*/
+!checkpoints/.gitkeep

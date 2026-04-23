@@ -1,0 +1,13 @@
+{
+  "abs_rel": NaN,
+  "sq_rel": NaN,
+  "rmse": NaN,
+  "rmse_log": NaN,
+  "delta1": 0.0,
+  "delta2": 0.0,
+  "delta3": 0.0,
+  "num_samples": 697,
+  "avg_inference_time": 0.45835098508782846,
+  "mean_scale": NaN,
+  "use_median_scaling": true
+}
