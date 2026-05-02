@@ -65,28 +65,59 @@ python evaluate_kitti.py \
     2>&1 | tee $LOG_DIR/eval_v11.log
 
 # ============================================================
-# v12: Ablation — higher smoothness (1e-2), LoRA r=8
+# v13: LoRA-only, decoder + head FROZEN — tries to beat zero-shot
+# Only 2.36M LoRA params train; decoder/head keep zero-shot weights
+# This is the most promising configuration for beating zero-shot
 # ============================================================
 echo ""
-echo ">>> [v12] Higher smoothness (1e-2), LoRA r=8, 20 epochs — $(date)"
+echo ">>> [v13] LoRA-only, frozen head+decoder, 10 epochs — $(date)"
 python train_kitti_selfsup_ms.py \
     --data-path $DATA \
-    --epochs 20 \
+    --epochs 10 \
     --stride 6 \
-    --smoothness-weight 1e-2 \
     --lora-rank 8 \
     --lora-alpha 8.0 \
-    --save-dir checkpoints/selfsup_v12 \
-    --wandb-name "v12-smooth-1e2-lora" \
-    2>&1 | tee $LOG_DIR/selfsup_training_v12.log
-echo ">>> [v12] DONE — $(date)"
-echo ">>> [v12] Evaluating..."
+    --lr-lora 1e-5 \
+    --freeze-head \
+    --freeze-decoder \
+    --save-dir checkpoints/selfsup_v13 \
+    --wandb-name "v13-lora-only-frozen-head" \
+    2>&1 | tee $LOG_DIR/selfsup_training_v13.log
+echo ">>> [v13] DONE — $(date)"
+echo ">>> [v13] Evaluating..."
 python evaluate_kitti.py \
-    --checkpoint checkpoints/selfsup_v12/selfsup_best.pt \
+    --checkpoint checkpoints/selfsup_v13/selfsup_best.pt \
     --lora-rank 8 --lora-alpha 8.0 \
-    --output results/eval_v12_smooth.json \
-    --wandb-name "v12-smooth-eval" \
-    2>&1 | tee $LOG_DIR/eval_v12.log
+    --output results/eval_v13_lora_only.json \
+    --wandb-name "v13-lora-only-eval" \
+    2>&1 | tee $LOG_DIR/eval_v13.log
+
+# ============================================================
+# v14: Gentle fine-tuning — LoRA + decoder/head with very low LR
+# LR 100x smaller than v10, only 5 epochs, early stopping
+# ============================================================
+echo ""
+echo ">>> [v14] Gentle fine-tuning (lr=1e-6), 5 epochs — $(date)"
+python train_kitti_selfsup_ms.py \
+    --data-path $DATA \
+    --epochs 5 \
+    --stride 6 \
+    --lora-rank 8 \
+    --lora-alpha 8.0 \
+    --lr-depth 1e-6 \
+    --lr-lora 1e-7 \
+    --lr-pose 1e-5 \
+    --save-dir checkpoints/selfsup_v14 \
+    --wandb-name "v14-gentle-lowlr" \
+    2>&1 | tee $LOG_DIR/selfsup_training_v14.log
+echo ">>> [v14] DONE — $(date)"
+echo ">>> [v14] Evaluating..."
+python evaluate_kitti.py \
+    --checkpoint checkpoints/selfsup_v14/selfsup_best.pt \
+    --lora-rank 8 --lora-alpha 8.0 \
+    --output results/eval_v14_gentle.json \
+    --wandb-name "v14-gentle-eval" \
+    2>&1 | tee $LOG_DIR/eval_v14.log
 
 echo ""
 echo "============================================================"

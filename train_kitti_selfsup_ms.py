@@ -44,6 +44,7 @@ def train_one_epoch(
     model, pose_net, warper, train_loader, optimizer, scaler,
     grad_accum_steps, device, epoch, smoothness_weight=1e-3,
     use_auto_mask=True, use_wandb=False, log_interval=50, global_step_offset=0,
+    consistency_weight=0.0,
 ):
     """Train one epoch of self-supervised depth estimation."""
     model.train()
@@ -116,6 +117,15 @@ def train_one_epoch(
                 auto_mask=use_auto_mask,
             )
             del warped_prev, warped_next
+
+            # Consistency loss — anchors model to zero-shot predictions
+            if consistency_weight > 0.0 and "zeroshot_depth" in batch:
+                zs_depth = batch["zeroshot_depth"].to(device)  # (B, 1, H, W)
+                # depth is already at pose resolution (H, W)
+                cons_loss = F.l1_loss(depth.clamp(0.1, 80.0), zs_depth.clamp(0.1, 80.0))
+                losses["consistency"] = cons_loss
+                losses["total"] = losses["total"] + consistency_weight * cons_loss
+
             loss = losses["total"] / grad_accum_steps
 
         # Skip step if loss is non-finite (prevents NaN from propagating)
@@ -394,6 +404,10 @@ def main():
     parser.add_argument("--lora-rank", type=int, default=8)
     parser.add_argument("--lora-alpha", type=float, default=8.0)
     parser.add_argument("--no-lora", action="store_true", help="Disable LoRA (decoder-only training)")
+    parser.add_argument("--freeze-head", action="store_true",
+                        help="Freeze depth head (keeps zero-shot depth structure)")
+    parser.add_argument("--freeze-decoder", action="store_true",
+                        help="Freeze decoder (keeps zero-shot decoder features)")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--smoothness-weight", type=float, default=1e-3)
@@ -411,6 +425,11 @@ def main():
     parser.add_argument("--vggt-poses", type=str, default=None,
                         help="Path to precomputed VGGT poses (.pt file from precompute_vggt_poses.py). "
                              "Replaces PoseNet with high-quality VGGT ego-motion estimates.")
+    parser.add_argument("--zeroshot-depths", type=str, default=None,
+                        help="Path to precomputed zero-shot Depth Pro depths (.pt). "
+                             "When set, adds consistency loss to anchor model to zero-shot.")
+    parser.add_argument("--consistency-weight", type=float, default=1.0,
+                        help="Weight lambda for consistency loss (only used with --zeroshot-depths).")
     args = parser.parse_args()
 
     pose_w, pose_h = [int(x) for x in args.pose_size.split("x")]
@@ -577,6 +596,12 @@ def main():
         vggt_poses = torch.load(args.vggt_poses, map_location="cpu")
         print(f"  Loaded {len(vggt_poses)} pose entries.")
 
+    zeroshot_depths = None
+    if args.zeroshot_depths:
+        print(f"Loading precomputed zero-shot depths from {args.zeroshot_depths}...")
+        zeroshot_depths = torch.load(args.zeroshot_depths, map_location="cpu")
+        print(f"  Loaded {len(zeroshot_depths)} depth maps. lambda={args.consistency_weight}")
+
     train_dataset = KITTIRawDataset(
         data_path=args.data_path,
         split_file=args.train_split,
@@ -585,6 +610,7 @@ def main():
         is_train=True,
         stride=args.stride,
         vggt_poses=vggt_poses,
+        zeroshot_depths=zeroshot_depths,
     )
     val_dataset = KITTIRawDataset(
         data_path=args.data_path,
@@ -609,10 +635,19 @@ def main():
     # ================================================================
     # Optimizer with discriminative learning rates
     # ================================================================
-    decoder_head_params = (
-        list(model.decoder.parameters())
-        + list(model.head.parameters())
-    )
+    decoder_head_params = []
+    if args.freeze_decoder:
+        for p in model.decoder.parameters():
+            p.requires_grad = False
+        print("FROZEN: decoder (keeps zero-shot decoder features)")
+    else:
+        decoder_head_params += list(model.decoder.parameters())
+    if args.freeze_head:
+        for p in model.head.parameters():
+            p.requires_grad = False
+        print("FROZEN: depth head (keeps zero-shot depth structure)")
+    else:
+        decoder_head_params += list(model.head.parameters())
 
     param_groups = [
         {"params": lora_params, "lr": args.lr_lora, "weight_decay": 0.01},
@@ -665,6 +700,7 @@ def main():
             use_wandb=use_wandb,
             log_interval=50,
             global_step_offset=(epoch - 1) * steps_per_epoch,
+            consistency_weight=args.consistency_weight if args.zeroshot_depths else 0.0,
         )
 
         if epoch > args.warmup_epochs:

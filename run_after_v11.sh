@@ -1,0 +1,79 @@
+#!/bin/bash
+# Wait for v11 (PID 184249) to finish, then run v11 eval + v13 + v14
+# This script handles the queue after we kill the original shell script.
+
+set -e
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate depth-pro
+
+DATA="datasets/kitti_raw"
+LOG_DIR="checkpoints"
+V11_PID=184249
+
+echo "Waiting for v11 (PID $V11_PID) to finish..."
+while ps -p $V11_PID > /dev/null 2>&1; do
+    sleep 60
+done
+echo ">>> v11 finished at $(date)"
+
+# v11 eval
+echo ">>> [v11] Evaluating..."
+python evaluate_kitti.py \
+    --checkpoint checkpoints/selfsup_v11/selfsup_best.pt \
+    --no-lora \
+    --output results/eval_v11_no_lora.json \
+    --wandb-name "v11-no-lora-eval" \
+    2>&1 | tee $LOG_DIR/eval_v11.log
+
+# v13: LoRA-only, frozen head+decoder (most likely to beat zero-shot)
+echo ""
+echo ">>> [v13] LoRA-only, frozen head+decoder, 10 epochs — $(date)"
+python train_kitti_selfsup_ms.py \
+    --data-path $DATA \
+    --epochs 10 \
+    --stride 6 \
+    --lora-rank 8 \
+    --lora-alpha 8.0 \
+    --lr-lora 1e-5 \
+    --freeze-head \
+    --freeze-decoder \
+    --save-dir checkpoints/selfsup_v13 \
+    --wandb-name "v13-lora-only-frozen-head" \
+    2>&1 | tee $LOG_DIR/selfsup_training_v13.log
+echo ">>> [v13] DONE — $(date)"
+echo ">>> [v13] Evaluating..."
+python evaluate_kitti.py \
+    --checkpoint checkpoints/selfsup_v13/selfsup_best.pt \
+    --lora-rank 8 --lora-alpha 8.0 \
+    --output results/eval_v13_lora_only.json \
+    --wandb-name "v13-lora-only-eval" \
+    2>&1 | tee $LOG_DIR/eval_v13.log
+
+# v14: Gentle fine-tuning with very low LR
+echo ""
+echo ">>> [v14] Gentle fine-tuning (lr=1e-6), 5 epochs — $(date)"
+python train_kitti_selfsup_ms.py \
+    --data-path $DATA \
+    --epochs 5 \
+    --stride 6 \
+    --lora-rank 8 \
+    --lora-alpha 8.0 \
+    --lr-depth 1e-6 \
+    --lr-lora 1e-7 \
+    --lr-pose 1e-5 \
+    --save-dir checkpoints/selfsup_v14 \
+    --wandb-name "v14-gentle-lowlr" \
+    2>&1 | tee $LOG_DIR/selfsup_training_v14.log
+echo ">>> [v14] DONE — $(date)"
+echo ">>> [v14] Evaluating..."
+python evaluate_kitti.py \
+    --checkpoint checkpoints/selfsup_v14/selfsup_best.pt \
+    --lora-rank 8 --lora-alpha 8.0 \
+    --output results/eval_v14_gentle.json \
+    --wandb-name "v14-gentle-eval" \
+    2>&1 | tee $LOG_DIR/eval_v14.log
+
+echo ""
+echo "============================================================"
+echo "All experiments done — $(date)"
+echo "============================================================"

@@ -37,6 +37,7 @@ class KITTIRawDataset(Dataset):
         frame_ids: tuple[int, ...] = (-1, 0, 1),
         stride: int = 1,
         vggt_poses: Optional[dict] = None,
+        zeroshot_depths: Optional[dict] = None,
     ):
         """Initialize KITTI dataset.
 
@@ -74,6 +75,8 @@ class KITTIRawDataset(Dataset):
 
         # Optional precomputed VGGT poses (replaces PoseNet)
         self.vggt_poses = vggt_poses  # {idx: {"T_prev": [4,4], "T_next": [4,4]}}
+        # Optional precomputed zero-shot depths (for consistency loss)
+        self.zeroshot_depths = zeroshot_depths  # {idx: tensor[H, W] fp16}
 
         # Depth Pro normalization
         self.depth_pro_normalize = transforms.Normalize(
@@ -226,8 +229,15 @@ class KITTIRawDataset(Dataset):
         # Add precomputed VGGT poses if available
         if self.vggt_poses is not None and index in self.vggt_poses:
             entry = self.vggt_poses[index]
-            result["T_prev"] = entry["T_prev"].float()  # [4, 4] target→prev
-            result["T_next"] = entry["T_next"].float()  # [4, 4] target→next
+            result["T_prev"] = entry["T_prev"].float()
+            result["T_next"] = entry["T_next"].float()
+
+        # Add precomputed zero-shot depth (for consistency loss)
+        if self.zeroshot_depths is not None and index in self.zeroshot_depths:
+            d = self.zeroshot_depths[index].float()  # [H, W]
+            if do_flip:
+                d = torch.flip(d, dims=[-1])
+            result["zeroshot_depth"] = d.unsqueeze(0)  # [1, H, W]
 
         return result
 
