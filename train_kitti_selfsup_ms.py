@@ -19,12 +19,32 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.cm as cm
+
+
+def _depth_to_wandb_image(depth_tensor, caption):
+    """Convert a (H, W) or (1, H, W) depth tensor in meters to a colored
+    inverse-depth image suitable for WandB. Uses percentile normalisation to
+    suppress outliers (e.g. clamped 10000 m sky pixels) and the magma colormap."""
+    if depth_tensor.dim() > 2:
+        depth_tensor = depth_tensor.squeeze()
+    d = depth_tensor.detach().cpu().float().numpy()
+    d = np.clip(d, 1.0, 80.0)             # KITTI valid range
+    inv = 1.0 / d                         # closer = brighter, standard convention
+    lo, hi = np.percentile(inv, [2, 98])  # robust to outliers
+    inv = np.clip((inv - lo) / (hi - lo + 1e-8), 0, 1)
+    rgb = (cm.magma(inv)[:, :, :3] * 255).astype(np.uint8)
+    return wandb.Image(rgb, caption=caption)
 
 # Set CUDA allocator config early to reduce fragmentation OOM
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -44,7 +64,7 @@ def train_one_epoch(
     model, pose_net, warper, train_loader, optimizer, scaler,
     grad_accum_steps, device, epoch, smoothness_weight=1e-3,
     use_auto_mask=True, use_wandb=False, log_interval=50, global_step_offset=0,
-    consistency_weight=0.0,
+    consistency_weight=0.0, edge_aware_consistency=False,
 ):
     """Train one epoch of self-supervised depth estimation."""
     model.train()
@@ -121,8 +141,27 @@ def train_one_epoch(
             # Consistency loss — anchors model to zero-shot predictions
             if consistency_weight > 0.0 and "zeroshot_depth" in batch:
                 zs_depth = batch["zeroshot_depth"].to(device)  # (B, 1, H, W)
-                # depth is already at pose resolution (H, W)
-                cons_loss = F.l1_loss(depth.clamp(0.1, 80.0), zs_depth.clamp(0.1, 80.0))
+                d_pred = depth.clamp(0.1, 80.0)
+                d_zs = zs_depth.clamp(0.1, 80.0)
+                diff = torch.abs(d_pred - d_zs)
+
+                if edge_aware_consistency:
+                    # Compute edge strength from zero-shot depth
+                    # High edge → boundary → weak anchor (let photometric refine)
+                    # Low edge → smooth region → strong anchor (preserve zero-shot)
+                    e_x = torch.abs(d_zs[..., 1:] - d_zs[..., :-1])
+                    e_y = torch.abs(d_zs[..., 1:, :] - d_zs[..., :-1, :])
+                    e_x = F.pad(e_x, (0, 1, 0, 0))   # back to [B, 1, H, W]
+                    e_y = F.pad(e_y, (0, 0, 0, 1))
+                    edge = (e_x + e_y) * 0.5
+                    # Normalize per-batch by median to be scale-invariant
+                    median = edge.median().clamp(min=1e-3)
+                    edge_norm = (edge / median).clamp(0, 5)
+                    weight = torch.exp(-2.0 * edge_norm)  # smooth regions ≈ 1, edges → 0
+                    cons_loss = (weight * diff).sum() / (weight.sum() + 1e-6)
+                else:
+                    cons_loss = diff.mean()
+
                 losses["consistency"] = cons_loss
                 losses["total"] = losses["total"] + consistency_weight * cons_loss
 
@@ -245,7 +284,7 @@ def validate_selfsup(model, pose_net, warper, val_loader, device,
             if "T_prev" in batch:
                 T_prev = batch["T_prev"].to(device)
                 T_next = batch["T_next"].to(device)
-            else:
+            elif pose_net is not None:
                 pt = normalize_imagenet(target_img)
                 pp = normalize_imagenet(source_prev)
                 pn = normalize_imagenet(source_next)
@@ -253,6 +292,12 @@ def validate_selfsup(model, pose_net, warper, val_loader, device,
                 vn = pose_net(pt, pn)
                 T_prev = pose_vec_to_matrix(vp[:, :3], vp[:, 3:])
                 T_next = pose_vec_to_matrix(vn[:, :3], vn[:, 3:])
+            else:
+                # No pose source — use identity (val photometric will be high but no crash)
+                B = target_img.shape[0]
+                eye = torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1)
+                T_prev = eye.clone()
+                T_next = eye.clone()
 
             warped_prev = warper(source_prev, depth, T_prev, K, inv_K)
             warped_next = warper(source_next, depth, T_next, K, inv_K)
@@ -265,9 +310,7 @@ def validate_selfsup(model, pose_net, warper, val_loader, device,
         count += 1
 
         if use_wandb and len(depth_imgs) < 8:
-            d = depth[0, 0].cpu().float().numpy()
-            d_norm = (d - d.min()) / (d.max() - d.min() + 1e-8)
-            depth_imgs.append(wandb.Image(d_norm, caption=f"epoch {epoch}"))
+            depth_imgs.append(_depth_to_wandb_image(depth[0], caption=f"epoch {epoch}"))
 
     metrics = {"val_photometric": total_photo / max(count, 1)}
     metrics["depth_images"] = depth_imgs
@@ -276,7 +319,6 @@ def validate_selfsup(model, pose_net, warper, val_loader, device,
     if gt_eval_split and gt_eval_data_path and Path(gt_eval_split).exists():
         from PIL import Image as PILImage
         from torchvision.transforms import ToTensor, Normalize as TvNorm
-        import numpy as np
 
         normalize_dp = TvNorm([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         to_tensor    = ToTensor()
@@ -430,6 +472,10 @@ def main():
                              "When set, adds consistency loss to anchor model to zero-shot.")
     parser.add_argument("--consistency-weight", type=float, default=1.0,
                         help="Weight lambda for consistency loss (only used with --zeroshot-depths).")
+    parser.add_argument("--edge-aware-consistency", action="store_true",
+                        help="Weight consistency loss by inverse edge strength: strong anchor in "
+                             "smooth regions, weak anchor at depth discontinuities (lets photometric "
+                             "loss refine edges where zero-shot is least accurate).")
     args = parser.parse_args()
 
     pose_w, pose_h = [int(x) for x in args.pose_size.split("x")]
@@ -602,6 +648,14 @@ def main():
         zeroshot_depths = torch.load(args.zeroshot_depths, map_location="cpu")
         print(f"  Loaded {len(zeroshot_depths)} depth maps. lambda={args.consistency_weight}")
 
+    # Auto-load val versions if files match the naming convention used by precompute scripts
+    vggt_poses_val = None
+    if args.vggt_poses:
+        val_path = args.vggt_poses.replace("_train_", "_val_")
+        if Path(val_path).exists():
+            vggt_poses_val = torch.load(val_path, map_location="cpu")
+            print(f"  Also loaded {len(vggt_poses_val)} val VGGT poses from {val_path}")
+
     train_dataset = KITTIRawDataset(
         data_path=args.data_path,
         split_file=args.train_split,
@@ -619,6 +673,7 @@ def main():
         pose_size=(pose_w, pose_h),
         is_train=False,
         stride=args.stride,
+        vggt_poses=vggt_poses_val,
     )
 
     train_loader = DataLoader(
@@ -701,6 +756,7 @@ def main():
             log_interval=50,
             global_step_offset=(epoch - 1) * steps_per_epoch,
             consistency_weight=args.consistency_weight if args.zeroshot_depths else 0.0,
+            edge_aware_consistency=args.edge_aware_consistency,
         )
 
         if epoch > args.warmup_epochs:

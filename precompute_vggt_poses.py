@@ -166,10 +166,10 @@ def main():
     try:
         from vggt.models.vggt import VGGT
         from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-        from vggt.utils.image_utils import load_and_preprocess_images
-    except ImportError:
-        print("VGGT not installed. Run: pip install vggt")
-        print("Or: pip install git+https://github.com/facebookresearch/vggt.git")
+        from vggt.utils.load_fn import load_and_preprocess_images
+    except ImportError as e:
+        print(f"VGGT import failed: {e}")
+        print("Run: pip install git+https://github.com/facebookresearch/vggt.git")
         return
 
     print("Loading VGGT-1B from HuggingFace (downloads ~2.4 GB on first run)...")
