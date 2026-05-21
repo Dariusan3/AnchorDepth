@@ -65,6 +65,7 @@ def train_one_epoch(
     grad_accum_steps, device, epoch, smoothness_weight=1e-3,
     use_auto_mask=True, use_wandb=False, log_interval=50, global_step_offset=0,
     consistency_weight=0.0, edge_aware_consistency=False,
+    consistency_mode="l1", depth_weight_power=0.0,
 ):
     """Train one epoch of self-supervised depth estimation."""
     model.train()
@@ -143,24 +144,37 @@ def train_one_epoch(
                 zs_depth = batch["zeroshot_depth"].to(device)  # (B, 1, H, W)
                 d_pred = depth.clamp(0.1, 80.0)
                 d_zs = zs_depth.clamp(0.1, 80.0)
-                diff = torch.abs(d_pred - d_zs)
+
+                if consistency_mode == "log":
+                    # Log-space consistency directly optimises RMSElog and ratio metrics
+                    diff = torch.abs(torch.log(d_pred) - torch.log(d_zs))
+                else:
+                    diff = torch.abs(d_pred - d_zs)
+
+                # Optional depth-power weighting: emphasise distant pixels
+                # where δ<1.25² and RMSElog typically suffer
+                if depth_weight_power > 0.0:
+                    weight_d = (d_zs / 80.0).clamp(0.05, 1.0).pow(depth_weight_power)
+                else:
+                    weight_d = torch.ones_like(d_zs)
 
                 if edge_aware_consistency:
-                    # Compute edge strength from zero-shot depth
-                    # High edge → boundary → weak anchor (let photometric refine)
-                    # Low edge → smooth region → strong anchor (preserve zero-shot)
                     e_x = torch.abs(d_zs[..., 1:] - d_zs[..., :-1])
                     e_y = torch.abs(d_zs[..., 1:, :] - d_zs[..., :-1, :])
-                    e_x = F.pad(e_x, (0, 1, 0, 0))   # back to [B, 1, H, W]
+                    e_x = F.pad(e_x, (0, 1, 0, 0))
                     e_y = F.pad(e_y, (0, 0, 0, 1))
                     edge = (e_x + e_y) * 0.5
-                    # Normalize per-batch by median to be scale-invariant
                     median = edge.median().clamp(min=1e-3)
                     edge_norm = (edge / median).clamp(0, 5)
-                    weight = torch.exp(-2.0 * edge_norm)  # smooth regions ≈ 1, edges → 0
-                    cons_loss = (weight * diff).sum() / (weight.sum() + 1e-6)
+                    weight_e = torch.exp(-2.0 * edge_norm)
+                    weight = weight_d * weight_e
                 else:
+                    weight = weight_d
+
+                if (weight == 1.0).all():
                     cons_loss = diff.mean()
+                else:
+                    cons_loss = (weight * diff).sum() / (weight.sum() + 1e-6)
 
                 losses["consistency"] = cons_loss
                 losses["total"] = losses["total"] + consistency_weight * cons_loss
@@ -472,6 +486,10 @@ def main():
                              "When set, adds consistency loss to anchor model to zero-shot.")
     parser.add_argument("--consistency-weight", type=float, default=1.0,
                         help="Weight lambda for consistency loss (only used with --zeroshot-depths).")
+    parser.add_argument("--consistency-mode", choices=["l1", "log"], default="l1",
+                        help="Consistency loss form: 'l1' on metric depth, 'log' on log-depth (better for δ thresholds and RMSElog)")
+    parser.add_argument("--depth-weight-power", type=float, default=0.0,
+                        help="Weight consistency loss by (depth/80)**power: emphasises distant pixels. 0=uniform, 1=linear, 2=quadratic.")
     parser.add_argument("--edge-aware-consistency", action="store_true",
                         help="Weight consistency loss by inverse edge strength: strong anchor in "
                              "smooth regions, weak anchor at depth discontinuities (lets photometric "
@@ -757,6 +775,8 @@ def main():
             global_step_offset=(epoch - 1) * steps_per_epoch,
             consistency_weight=args.consistency_weight if args.zeroshot_depths else 0.0,
             edge_aware_consistency=args.edge_aware_consistency,
+            consistency_mode=args.consistency_mode,
+            depth_weight_power=args.depth_weight_power,
         )
 
         if epoch > args.warmup_epochs:

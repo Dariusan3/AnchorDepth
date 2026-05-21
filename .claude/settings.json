@@ -20,7 +20,42 @@
       "Bash(lsmod)",
       "Bash(ls /dev/nvidia*)",
       "Bash(ls checkpoints/*.pt)",
-      "Bash(chmod +x eval_all_checkpoints.sh)"
+      "Bash(chmod +x eval_all_checkpoints.sh)",
+      "Bash(ls results/*.json)",
+      "Bash(echo \"Zero-shot eval PID: $!\")",
+      "Bash(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits)",
+      "Bash(ps -p 175451 -o etime=)",
+      "Bash(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader)",
+      "Bash(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader)",
+      "Bash(dmesg)",
+      "Bash(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)",
+      "Bash(pkill -f \"train_kitti_selfsup_ms\")",
+      "Bash(nvidia-smi --query-gpu=utilization.gpu,memory.used,temperature.gpu,power.draw,power.limit --format=csv,noheader)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:openaccess.thecvf.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:learnopencv.com)",
+      "Bash(awk '{print $1, $2}')",
+      "Bash(ls -la results/eval_*.json)",
+      "Bash(ls /home/ubuntu/ml-depth-pro/src/depth_pro/*.py)",
+      "Bash(python3)",
+      "Bash(cat)",
+      "Bash(python3 /tmp/analyze_scaling.py)",
+      "Bash(awk '{print $2, $11, $12, $13}')",
+      "Bash(chmod +x run_after_v11.sh)",
+      "Bash(kill 3194 3201)",
+      "Read(//home/ubuntu/anaconda3/envs/depth-pro/lib/python3.10/site-packages/vggt/utils/**)",
+      "Bash(ps -p 3013 -o pid,user,cmd)",
+      "Bash(pkill -9 -f \"train_kitti_selfsup_ms\")",
+      "Bash(pkill -9 -f \"run_v18.sh\")",
+      "Bash(pkill -9 -f \"run_v19.sh\")",
+      "Bash(nvidia-smi --query-gpu=memory.used --format=csv,noheader)",
+      "Bash(kill -9 2989)",
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(f'Epochs done: {len\\(data\\)}'\\); print\\(f'Best val_photo: {min\\(\\(e[\\\\\"val_photometric\\\\\"] for e in data if \\\\\"val_photometric\\\\\" in e\\)\\):.4f}'\\); print\\(f'Best at epoch: {[e[\\\\\"epoch\\\\\"] for e in data if e.get\\(\\\\\"val_photometric\\\\\"\\)==min\\(\\(e2[\\\\\"val_photometric\\\\\"] for e2 in data if \\\\\"val_photometric\\\\\" in e2\\)\\)][0]}'\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(f'{k}: {v}'\\) for k,v in d.items\\(\\) if k not in ['num_samples','avg_inference_time','use_median_scaling','mean_scale']]\")"
+    ],
+    "additionalDirectories": [
+      "/home/ubuntu/ml-depth-pro/checkpoints/selfsup_v14"
     ]
   }
 }
