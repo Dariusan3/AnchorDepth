@@ -52,7 +52,16 @@
       "Bash(nvidia-smi --query-gpu=memory.used --format=csv,noheader)",
       "Bash(kill -9 2989)",
       "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(f'Epochs done: {len\\(data\\)}'\\); print\\(f'Best val_photo: {min\\(\\(e[\\\\\"val_photometric\\\\\"] for e in data if \\\\\"val_photometric\\\\\" in e\\)\\):.4f}'\\); print\\(f'Best at epoch: {[e[\\\\\"epoch\\\\\"] for e in data if e.get\\(\\\\\"val_photometric\\\\\"\\)==min\\(\\(e2[\\\\\"val_photometric\\\\\"] for e2 in data if \\\\\"val_photometric\\\\\" in e2\\)\\)][0]}'\\)\")",
-      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(f'{k}: {v}'\\) for k,v in d.items\\(\\) if k not in ['num_samples','avg_inference_time','use_median_scaling','mean_scale']]\")"
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(f'{k}: {v}'\\) for k,v in d.items\\(\\) if k not in ['num_samples','avg_inference_time','use_median_scaling','mean_scale']]\")",
+      "Bash(git fetch *)",
+      "Bash(git mv *)",
+      "Bash(mkdir -p datasets/make3d)",
+      "Bash(wget -q --show-progress -nc http://www.cs.cornell.edu/~asaxena/learningdepth/Test134.tar.gz)",
+      "Bash(wget -q --show-progress -nc http://www.cs.cornell.edu/~asaxena/learningdepth/Test134Depth.tar.gz)",
+      "Bash(tar -xzf Test134.tar.gz)",
+      "Bash(tar -xzf Test134Depth.tar.gz)",
+      "Bash(unzip -q leftImg8bit_trainvaltest.zip 'leftImg8bit/val/*')",
+      "Bash(unzip -q disparity_trainvaltest.zip 'disparity/val/*')"
     ],
     "additionalDirectories": [
       "/home/ubuntu/ml-depth-pro/checkpoints/selfsup_v14"
