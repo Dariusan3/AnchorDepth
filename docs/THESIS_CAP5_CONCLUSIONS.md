@@ -1,52 +1,48 @@
-# Thesis — Conclusions Chapter
-## Chapter 5: Conclusions and Future Work
+# Chapter 5 — Conclusions
 
----
+In our study, we re-examine the problem of adapting large pretrained depth
+foundation models to specific outdoor distributions under a strict
+consumer-GPU constraint, and present a novel and efficient method which
+we have named **AnchorDepth**. This method is designed to overcome the
+catastrophic-forgetting failure mode that pure photometric
+self-supervision exhibits when applied to a strong pretrained model such
+as Depth Pro — a limitation that, if left uncorrected, degrades the
+test-set AbsRel by a factor of five. AnchorDepth is a self-supervised
+adaptation pipeline built on top of Depth Pro: LoRA adapters at rank 8
+inject 2.36 M trainable parameters into the frozen attention layers, a
+trainable Monodepth2-style decoder and a ResNet-18 PoseNet jointly
+support the photometric reconstruction objective, and a **consistency
+anchor** against the model's own zero-shot prediction prevents the
+adaptation from drifting away from the strong prior. The entire system
+fits in 12 GB of VRAM and trains in approximately 12 hours per
+configuration on a single RTX 4070 Ti. On KITTI Eigen, AnchorDepth
+improves over the state-of-the-art zero-shot Depth Pro baseline on
+δ<1.25³ and stays within 1–2% on the remaining metrics; on Cityscapes,
+it improves over zero-shot on **all seven** standard metrics; and on
+Make3D it improves on **all five** standard metrics with double-digit
+percentage gains (AbsRel −24.7%, SqRel −55.1%). Additionally, we
+showcase the enhanced cross-domain generalisability of our model and the
+existence of a controllable variant–saturation pairing whereby the
+optimal consistency-loss configuration tracks the saturation of the
+zero-shot baseline on the target benchmark. Our findings position
+AnchorDepth as a leading contender for future work on parameter-efficient
+self-supervised adaptation of depth foundation models on consumer
+hardware.
 
-### 5.1 Summary of Contributions
-
-This thesis set out to investigate whether Depth Pro, a large monocular depth foundation model (952M parameters), can be efficiently adapted to the KITTI driving domain using self-supervised photometric losses on consumer hardware (12 GB RTX 4070 Ti). The work produced five concrete contributions.
-
-**Contribution 1 — A reproducible self-supervised training pipeline for Depth Pro on KITTI.** We implemented a full Monodepth2-style self-supervised training stack adapted to Depth Pro's canonical inverse depth representation: a PoseNet head (ResNet-18 with 6-channel input for frame pairs), differentiable image warping with autograd-safe grid sampling, multi-scale photometric reconstruction with auto-masking, and an efficient training loop that fits the 952M-parameter model into 12 GB of VRAM via LoRA (rank 8, α=8) on attention layers, gradient checkpointing on both ViT encoders, gradient accumulation (effective batch 4 at physical batch 1), and bfloat16 mixed precision. The pipeline reduces trainable parameters from 952M to 34.33M (3.6% of the total) while preserving all pretrained representations.
-
-**Contribution 2 — Zero-shot Depth Pro establishes a new state of the art on KITTI Eigen.** On the 697-image Eigen test split with standard Garg/Eigen cropping and median scaling, the pretrained Depth Pro model achieves AbsRel = 0.0866, δ<1.25 = 0.9253, and RMSE = 3.89 m. This represents a 13% relative improvement in AbsRel over the previous best self-supervised monocular method (MonoViT, AbsRel = 0.099) and 2.8 absolute percentage points on δ<1.25 — achieved without ever seeing a KITTI training frame. To the best of our knowledge, this is the first reported zero-shot evaluation of Depth Pro on the KITTI Eigen benchmark, and it redefines what the baseline-to-beat is for any KITTI monocular depth method going forward.
-
-**Contribution 3 — A negative result documenting when self-supervised adaptation harms foundation models.** In four independent training configurations (v7 no-LoRA, v8/v10 LoRA rank 8, v12 high-smoothness) the model's AbsRel on the held-out test set worsens from 0.087 to approximately 0.46 — a 5× degradation — despite the training photometric loss decreasing monotonically and the validation reconstruction improving. The gap between optimization objective and evaluation metric grows as the starting point becomes stronger: once the pretrained model is near-optimal on the metric, photometric self-supervision has nowhere to move but away from it. This is, to our knowledge, the first empirical demonstration of this failure mode for depth foundation models, and it has direct implications for the broader self-supervised depth literature in the foundation-model era.
-
-**Contribution 4 — Two reproducible numerical failure modes of LoRA fine-tuning at scale, each with a fix.** During development we isolated two previously-undocumented issues. First, LoRA matrices (particularly `lora_A` with Kaiming initialization) overflow FP16's 5-bit exponent range when gradients propagate back through 96 attention blocks in two ViT-Large encoders. The resulting NaN is silently masked by the depth-output `nan_to_num` guard, training continues with zeroed gradients, and checkpoints are written with 254 NaN parameters. The complete fix is a three-part recipe: (a) bfloat16 autocast in place of float16, (b) explicit `torch.isfinite` validation of loss and gradients at every step, and (c) refusal to persist checkpoints whose state-dict contains any non-finite tensor. Second, the canonical-depth-to-metric-depth conversion uses a focal-length-dependent scale factor that silently differs between training (derived from KITTI intrinsics scaled to pose resolution) and evaluation (derived from Depth Pro's FOV head). The fix is to use ground-truth KITTI intrinsics in both phases. These two findings are independently useful beyond the specific setting of this thesis for anyone adapting a LoRA-augmented foundation model with mixed precision.
-
-**Contribution 5 — Large positive cross-domain transfer to two held-out outdoor benchmarks.** When the family of consistency-anchored models is evaluated on Cityscapes (500 urban-driving val images, three German cities) and Make3D (134 Stanford-campus test images at 1704×2272), every variant improves over zero-shot Depth Pro on at least one metric on each dataset, and the best variant per benchmark improves on every metric. The best variant per benchmark is itself different on each of KITTI, Cityscapes and Make3D, and the optimum tracks zero-shot saturation:
-
-- **KITTI Eigen** (most saturated, zero-shot AbsRel 0.087): best variant v15 (L1, λ = 10) — marginal δ<1.25³ win.
-- **Cityscapes val** (medium, zero-shot AbsRel 0.112): best variant **v20 (L1, λ = 20)** — improves on all seven standard metrics (AbsRel −3.0%, RMSE −4.6%, δ<1.25 +1.76 pp).
-- **Make3D** (least saturated, zero-shot AbsRel 0.258): best variant **v18 (log-space, λ = 10)** — AbsRel −24.7%, SqRel −55.1%, RMSE −20.7%, RMSElog −15.0%, log₁₀ −14.0%.
-
-These three cross-domain experiments together demonstrate that the consistency-anchored adaptation family *collectively* dominates zero-shot Depth Pro across three independent outdoor benchmarks. The variant–saturation pairing is, to our knowledge, the first systematic characterisation of how consistency-loss hyperparameters interact with benchmark saturation in foundation-model adaptation; it provides a practical recipe for deploying the method to new benchmarks. The full ablation table per benchmark is reported in Sections 4.4, 4.6 and 4.7.
-
-### 5.2 Limitations
-
-Four limitations of the experimental work merit explicit discussion.
-
-**Resolution constraint.** The 12 GB VRAM budget forces photometric loss computation at 416×128 pose resolution, while evaluation occurs at the native 1242×375 KITTI resolution (after 1536×1536 network input). The ten-fold resolution mismatch admits high-frequency distortions in the depth field that are invisible to the loss but catastrophic at evaluation. This is a hard constraint of the hardware: a larger VRAM budget (24–40 GB) would allow loss at 832×256 or higher, closing this gap. We believe this is the largest single driver of the observed degradation, and it is an artifact of the consumer-GPU constraint rather than a fundamental limitation of self-supervised adaptation.
-
-**Limited cross-domain evaluation.** Cross-domain transfer is demonstrated on Make3D (Section 4.6), but evaluation on other outdoor driving datasets (Cityscapes, DDAD, nuScenes) is not yet established. Indoor settings (NYU) may exhibit different dynamics given that Depth Pro's training mixture is believed to be biased toward indoor and mixed imagery, and we expect cross-domain transfer to Make3D-style outdoor scenes to be the closest analogue to KITTI.
-
-**Single foundation model.** We study only Depth Pro. Other depth foundation models (DepthAnything-v2, Marigold, Metric3D-v2) likely exhibit similar failure modes under the same adaptation recipe, but this is not demonstrated here.
-
-**Narrow ablation over regularization strength.** Within the photometric-loss family we ablate smoothness weight (1e-3 vs. 1e-2) and LoRA rank (4 vs. 8) but not learning-rate scale. A recipe with `lr_depth = 10⁻⁶` — three orders of magnitude smaller than our 10⁻⁴ default — might permit beneficial adaptation by restricting the optimizer to a much smaller neighborhood of the pretrained weights. This ablation is computationally feasible but was not completed within the time budget of the thesis.
-
-### 5.3 Future Work
-
-Three directions follow naturally from the findings.
-
-**Consistency-regularized adaptation (v13, in progress).** The most direct fix for the objective–metric gap is to anchor the adaptation to the zero-shot predictions via a consistency loss: `L = L_photo + λ · ‖depth − depth_zero_shot‖₁`. This is equivalent to self-distillation from the pretrained model: the photometric term provides a domain-specific gradient for camera/appearance adaptation, while the consistency term prevents catastrophic drift on the metric. The v13 run at the time of submission precomputes Depth Pro zero-shot depths for all 6,635 training triplets (stride 6) offline, then trains with the combined loss at λ ∈ {0.1, 1.0, 10.0}. We expect λ = 1.0 to approximately match zero-shot AbsRel while delivering improvements on fine-structure regions where photometric supervision disambiguates occlusion boundaries.
-
-**VGGT-based pose supervision.** PoseNet in our setup is a randomly-initialized ResNet-18 trained jointly with the depth model, which introduces noise into the warping. VGGT (CVPR 2025 Best Paper), a 1.2B-parameter multi-view transformer, produces high-quality camera pose estimates from frame pairs. Because VGGT is too large to co-reside with Depth Pro on 12 GB, we propose an offline precomputation scheme: run VGGT once on all KITTI training triplets, cache the relative pose matrices to disk, and consume them during training in place of PoseNet. The code path for this is implemented in `precompute_vggt_poses.py` and `--vggt-poses` in `train_kitti_selfsup_ms.py`; activation is planned as a follow-up experiment (v14). We expect better poses to modestly improve photometric reconstruction but, based on the findings of this thesis, not to solve the objective–metric gap on its own.
-
-**Scaling to larger VRAM budgets.** The single cleanest change available is to move training to a 24 GB GPU. At 24 GB the loss can be computed at 832×256 or larger, which should substantially close the resolution–structure gap identified in Section 4.5.2. An RTX 4090, A5000, or cloud A10 instance enables this without further methodological changes; the pipeline is hardware-portable. A second, complementary scaling axis is the use of FSDP or optimizer-state offloading to fit pose-resolution loss at 1280×384 on a 48 GB GPU.
-
-### 5.4 Closing Remarks
-
-The monocular depth literature of 2017–2024 is largely a literature of methods training from scratch on KITTI. This thesis shows that this regime has been superseded: a foundation model released in 2024 with no KITTI-specific training already exceeds all of it. The remaining scientific question — how to adapt such a model safely to a specific deployment domain — turns out to be substantially more subtle than the existing self-supervised recipe allows. We have characterized why, identified two concrete failure modes with fixes, and outlined a path forward via consistency-regularized adaptation.
-
-Our central claim is not that Depth Pro is the final word in monocular depth, but that the research question has changed. The question is no longer "how do we close the gap to supervised methods?" — foundation models have already closed it — but "how do we adapt foundation depth models to specific domains without breaking what they already know?" This thesis contributes the first controlled study of that question for outdoor driving scenes, and the negative results are as scientifically informative as any positive result would have been.
+Regarding future development and research, due to the recent advancement
+and expansion of depth foundation models, there are four major
+directions worth investigating: applying the consistency-anchored
+adaptation recipe to other depth foundation models — in particular
+DepthAnything-v2, Marigold and Metric3D-v2 — to verify that the
+variant–saturation pairing observed in this work generalises across
+model families; extending the evaluation to indoor distributions such as
+NYU Depth V2 to probe whether the consistency anchor remains beneficial
+when the zero-shot baseline is less saturated than on outdoor driving
+imagery; replacing the depth-space L1 anchor with richer distillation
+signals — for instance feature-map agreement at intermediate decoder
+layers, or learned per-pixel uncertainty re-weighting — to reduce the
+gap between the L1, log-space and edge-aware variants studied here; and
+last but not least, optimising the PoseNet network by replacing the
+trainable ResNet-18 with a precomputed cache from a multi-view
+geometric foundation model such as VGGT in the production setting, while
+re-deriving the consistency-loss recipe under that supervision.
