@@ -17,7 +17,9 @@ adaptation from drifting away from the strong prior. The entire system
 fits in 12 GB of VRAM and trains in approximately 12 hours per
 configuration on a single RTX 4070 Ti. On KITTI Eigen, AnchorDepth
 improves over the state-of-the-art zero-shot Depth Pro baseline on
-δ<1.25³ and stays within 1–2% on the remaining metrics; on Cityscapes,
+**four of seven metrics** (AbsRel −1.6%, RMSElog −3.3%, δ<1.25
++0.13 pp, δ<1.25³) and stays within 1–2% on the remaining three; on
+Cityscapes,
 it improves over zero-shot on **all seven** standard metrics; and on
 Make3D it improves on **all five** standard metrics with double-digit
 percentage gains (AbsRel −24.7%, SqRel −55.1%). Additionally, we

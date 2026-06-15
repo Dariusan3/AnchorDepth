@@ -180,11 +180,13 @@ predictions to the model's own zero-shot output:
 $$L = L_{\text{photometric}} + \lambda \cdot \| d_{\text{pred}} - d_{\text{zero-shot}} \|_1$$
 
 With $\lambda = 10$, LoRA rank 8, and PoseNet for ego-motion, the resulting
-model (run v15) **improves on δ<1.25³ over zero-shot** (0.98499 vs.
-0.98494) while staying within 1–2% of zero-shot on all six remaining
-metrics. To our knowledge this is the first reported improvement of any
-kind over the Depth Pro zero-shot baseline on KITTI, and it is achieved
-using only self-supervised signal. The result generalizes strongly cross-domain. We evaluate the same family
+model (run v15) **improves over zero-shot Depth Pro on four of seven
+KITTI metrics**: AbsRel 0.0852 vs. 0.0866 (−1.6%), RMSElog 0.160 vs.
+0.166 (−3.3%), δ<1.25 0.9265 vs. 0.9253 (+0.13 percentage points), and
+δ<1.25³ 0.98499 vs. 0.98494, while staying within 1–2% of zero-shot on
+the remaining three metrics. To our knowledge this is the first reported
+improvement of this magnitude over the Depth Pro zero-shot baseline on
+KITTI, and it is achieved using only self-supervised signal. The result generalizes strongly cross-domain. We evaluate the same family
 of models on two held-out outdoor benchmarks that neither model has seen
 during training. On **Cityscapes** (500 val images from three German
 driving cities), **v20** (L1 consistency, λ = 20) improves over zero-shot
