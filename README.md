@@ -31,9 +31,9 @@ Total trainable parameters: **34 M out of 966 M (3.6%)**.
 
 ## Highlights
 
-- **First reported improvement over zero-shot Depth Pro on KITTI Eigen** —
-  AnchorDepth improves δ<1.25³ over zero-shot while staying within 1–2% on the
-  remaining six metrics.
+- **Improves over zero-shot Depth Pro on KITTI Eigen on 4 of 7 metrics** —
+  AbsRel (−1.6%), RMSElog (−3.3%), δ<1.25 (+1.3 pp) and δ<1.25³, while
+  staying within 1–2% on the remaining three.
 - **Wins on Cityscapes (cross-domain)** — improves over zero-shot on all
   seven standard metrics (AbsRel −3.0%, RMSE −4.6%, δ<1.25 +1.76 pp).
 - **Wins on Make3D (cross-domain)** — improves over zero-shot on all five
@@ -47,8 +47,8 @@ Total trainable parameters: **34 M out of 966 M (3.6%)**.
 |--------|---------:|-------:|---------:|----------:|
 | Monodepth2 (ICCV'19)    | 0.115  | 4.863 | 0.877  | 0.981   |
 | MonoViT (3DV'22)        | 0.099  | 4.372 | 0.900  | 0.984   |
-| Depth Pro zero-shot     | 0.0866 | 3.893 | 0.9253 | 0.98494 |
-| **AnchorDepth (ours)**  | **0.0875** | **3.957** | **0.9236** | **0.98499** |
+| Depth Pro zero-shot     | 0.0866 | **3.893** | 0.9253 | 0.98494 |
+| **AnchorDepth (ours)**  | **0.0852** | 3.957 | **0.9265** | **0.98499** |
 
 ### Cityscapes (500 val images, zero-shot cross-domain)
 

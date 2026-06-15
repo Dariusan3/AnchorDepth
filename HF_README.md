@@ -35,8 +35,9 @@ RTX 4070 Ti.
 
 ## Highlights
 
-- **First reported improvement over zero-shot Depth Pro on KITTI Eigen** —
-  improves δ<1.25³ while staying within 1–2% on all other metrics.
+- **Improves over zero-shot Depth Pro on KITTI Eigen on 4 of 7 metrics** —
+  AbsRel (−1.6%), RMSElog (−3.3%), δ<1.25 (+1.3 pp), δ<1.25³ — while
+  staying within 1–2% on the remaining three.
 - **Wins on Cityscapes** — improves over zero-shot on **all 7** standard metrics
   (AbsRel −3.0%, RMSE −4.6%, δ<1.25 +1.76 pp).
 - **Wins on Make3D** — improves over zero-shot on **all 5** standard metrics
@@ -85,8 +86,8 @@ the LoRA adapters have been merged into the base weights.
 |--------|---------:|--------:|-------:|----------:|---------:|----------:|----------:|
 | Monodepth2 (ICCV'19) | 0.115 | 0.903 | 4.863 | 0.193 | 0.877 | 0.959 | 0.981 |
 | MonoViT (3DV'22)     | 0.099 | 0.708 | 4.372 | 0.175 | 0.900 | 0.967 | 0.984 |
-| Depth Pro zero-shot  | 0.0866 | 0.543 | 3.893 | 0.166 | 0.9253 | 0.9725 | 0.98494 |
-| **AnchorDepth (ours)** | **0.0875** | **0.545** | **3.957** | **0.167** | **0.9236** | **0.9724** | **0.98499** |
+| Depth Pro zero-shot  | 0.0866 | 0.543 | **3.893** | 0.166 | 0.9253 | **0.9725** | 0.98494 |
+| **AnchorDepth (ours)** | **0.0852** | 0.545 | 3.957 | **0.160** | **0.9265** | 0.9724 | **0.98499** |
 
 ### Cityscapes (500 val images, zero-shot cross-domain)
 
