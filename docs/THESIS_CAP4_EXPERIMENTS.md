@@ -194,27 +194,26 @@ vs. VGGT precomputed poses). Catastrophic configurations are reported
 together with successful ones to make explicit *why* a consistency anchor
 is necessary on a strong foundation model.
 
-**Table 4.4 — Comprehensive ablation on KITTI Eigen (697 test images).** All variants use LoRA rank 8 on the Depth Pro backbone, bfloat16 mixed precision and the Monodepth2 photometric loss; the rows differ only in the consistency-loss configuration and pose source.
+**Table 4.4 — Comprehensive ablation on KITTI Eigen (697 test images, median scaling, 80 m cap).** All variants use LoRA rank 8 on the Depth Pro backbone, bfloat16 mixed precision and the Monodepth2 photometric loss; the rows differ only in the consistency-loss configuration and pose source.
 
-| # | Configuration | Anchor form | $\lambda$ | Pose source | AbsRel ↓ | SqRel ↓ | RMSE ↓ | δ<1.25 ↑ | δ<1.25³ ↑ |
-|:--:|---------------|:-----------:|:---------:|:-----------:|---------:|--------:|-------:|---------:|----------:|
-|    | Depth Pro zero-shot (baseline)                       | —          | — | —             | 0.0866 | 0.543 | 3.893 | 0.9253 | 0.98494 |
-|    | **— Group A: necessity of the consistency anchor —** | | | | | | | | |
-| 1  | Pure photometric, full LoRA + decoder + head         | none       | 0 | trained PoseNet | 0.458 | 4.900 | 12.19 | 0.296 | 0.7515 |
-| 2  | Pure photometric, no LoRA (decoder only)             | none       | 0 | trained PoseNet | 0.458 | 4.900 | 12.19 | 0.296 | 0.7515 |
-| 3  | Pure photometric, LoRA only with frozen decoder/head | none       | 0 | trained PoseNet | 0.458 | 4.900 | 12.19 | 0.296 | 0.7515 |
-|    | **— Group B: anchor weight $\lambda$ (L1 distance) —** | | | | | | | | |
-| 4  | Weak anchor                                          | L1 metric  | 1 | trained PoseNet | 0.094 | 0.587 | 4.250 | 0.915 | 0.98480 |
-| 5  | **AnchorDepth — recommended setting**                | **L1 metric** | **10** | **trained PoseNet** | **0.0852** | **0.545** | **3.957** | **0.9265** | **0.98499** |
-| 6  | Strong anchor                                        | L1 metric  | 20 | trained PoseNet | 0.091 | 0.630 | 4.109 | 0.923 | 0.98445 |
-|    | **— Group C: anchor distance form ($\lambda = 10$) —** | | | | | | | | |
-| 7  | L1 metric depth (default)                            | L1 metric  | 10 | trained PoseNet | 0.0852 | 0.545 | 3.957 | 0.9265 | 0.98499 |
-| 8  | Log-space depth                                      | L1 log-depth | 10 | trained PoseNet | 0.100 | 0.579 | 4.266 | 0.907 | 0.98378 |
-| 9  | Depth-power weighted (catastrophic)                  | L1 log + (d/80)² | 10 | trained PoseNet | 0.154 | 2.197 | 8.216 | 0.825 | 0.97482 |
-|    | **— Group D: pose-supervision source —** | | | | | | | | |
-| 10 | Trained PoseNet (default)                            | L1 metric  | 10 | trained PoseNet | 0.0852 | 0.545 | 3.957 | 0.9265 | 0.98499 |
-| 11 | VGGT precomputed poses, edge-aware anchor            | L1 + edge-aware | 1 | VGGT cache | 0.093 | 0.589 | 4.267 | 0.912 | 0.98500 |
-| 12 | VGGT precomputed poses, log-space anchor             | L1 log-depth | 10 | VGGT cache | 0.103 | 0.713 | 5.098 | 0.878 | 0.98397 |
+| # | Configuration                                         | Anchor form        | $\lambda$ | Pose source     | AbsRel ↓ | SqRel ↓ | RMSE ↓ | RMSElog ↓ | δ<1.25 ↑ | δ<1.25² ↑ | δ<1.25³ ↑ |
+|:--:|-------------------------------------------------------|:-----------------:|:---------:|:---------------:|---------:|--------:|-------:|----------:|---------:|----------:|----------:|
+|   | Depth Pro zero-shot (baseline)                        | —                 | —         | —               | 0.0866   | 0.5429  | 3.893  | 0.1655    | 0.9253   | 0.9725    | 0.98494   |
+| **— Group A: necessity of the consistency anchor —** | | | | | | | | | | | |
+| 1 | Pure photometric, full LoRA + decoder + head          | none              | 0         | trained PoseNet | 0.4576   | 4.900   | 12.19  | 0.6012    | 0.2964   | 0.5482    | 0.75151   |
+| 2 | Pure photometric, no LoRA (decoder only)              | none              | 0         | trained PoseNet | 0.4576   | 4.900   | 12.19  | 0.6012    | 0.2964   | 0.5482    | 0.75151   |
+| 3 | Pure photometric, LoRA only with frozen decoder/head  | none              | 0         | trained PoseNet | 0.4576   | 4.900   | 12.19  | 0.6012    | 0.2964   | 0.5482    | 0.75151   |
+| **— Group B: anchor weight $\lambda$ (L1 distance, trained PoseNet) —** | | | | | | | | | | | |
+| 4 | **AnchorDepth — recommended setting** ★               | **L1 metric**     | **10**    | **PoseNet**     | **0.0852** | **0.545** | **3.957** | **0.160** | **0.9265** | **0.9724** | **0.98499** |
+| 5 | Strong anchor (over-constrained)                      | L1 metric         | 20        | PoseNet         | 0.0905   | 0.6301  | 4.109  | 0.1689    | 0.9233   | 0.9718    | 0.98445   |
+| **— Group C: anchor distance form ($\lambda = 10$, trained PoseNet) —** | | | | | | | | | | | |
+| 6 | L1 metric depth (default)                             | L1 metric         | 10        | PoseNet         | 0.0852   | 0.545   | 3.957  | 0.160     | 0.9265   | 0.9724    | 0.98499   |
+| 7 | Log-space depth                                       | L1 log-depth      | 10        | PoseNet         | 0.1001   | 0.5786  | 4.266  | 0.1782    | 0.9074   | 0.9688    | 0.98378   |
+| 8 | Log + depth-power weighting (catastrophic)            | L1 log + (d/80)²  | 10        | PoseNet         | 0.1536   | 2.197   | 8.216  | 0.2303    | 0.8247   | 0.9308    | 0.97482   |
+| **— Group D: pose-supervision source (L1 metric anchor) —** | | | | | | | | | | | |
+| 9 | Trained PoseNet (default)                             | L1 metric         | 10        | PoseNet         | 0.0852   | 0.545   | 3.957  | 0.160     | 0.9265   | 0.9724    | 0.98499   |
+| 10 | VGGT precomputed poses + edge-aware anchor           | L1 + edge-aware   | 1         | VGGT cache      | 0.0932   | 0.5889  | 4.267  | 0.1721    | 0.9117   | 0.9711    | 0.98500   |
+| 11 | VGGT precomputed poses + log-space anchor            | L1 log-depth      | 10        | VGGT cache      | 0.1035   | 0.7131  | 5.098  | 0.1893    | 0.8778   | 0.9626    | 0.98397   |
 
 The ablation reveals four findings. First, **removing the consistency
 anchor is catastrophic** regardless of which other components are
@@ -226,18 +225,18 @@ loss minimises reconstruction error successfully (the training loss
 decreases monotonically), but the resulting depth predictions are
 unusable on the held-out test set. This is the central negative result
 the consistency anchor is designed to fix. Second, **the anchor weight
-$\lambda = 10$ produces the best in-domain KITTI performance** (row 5),
+$\lambda = 10$ produces the best in-domain KITTI performance** (row 4),
 improving over zero-shot on AbsRel, RMSElog, δ<1.25 and δ<1.25³ while
-staying within 1–2% on the remaining three metrics. Weaker anchors
-(row 4, $\lambda = 1$) allow the photometric gradient to drift too far,
-while stronger anchors (row 6, $\lambda = 20$) over-constrain and prevent
-useful local refinement. Third, **the L1 metric distance dominates the
+staying within 1–2% on the remaining three metrics. A stronger anchor (row 5, $\lambda = 20$)
+over-constrains the adaptation, slightly degrading every metric relative
+to the recommended setting and demonstrating that the consistency-loss
+gradient must be balanced — not maximised — to extract benefit. Third, **the L1 metric distance dominates the
 log-space and depth-power variants** on the saturated KITTI benchmark
-(rows 7–9); the log-space distance only becomes preferable on Make3D,
+(rows 6–8); the log-space distance only becomes preferable on Make3D,
 where the depth distribution spans a wider range (Section 4.5). The
-depth-power weighting in row 9 catastrophically over-anchors at distant
+depth-power weighting in row 8 catastrophically over-anchors at distant
 pixels and is reported here as a negative control. Fourth, **VGGT-supplied
-poses do not improve over the trained PoseNet on KITTI** (rows 10–12)
+poses do not improve over the trained PoseNet on KITTI** (rows 9–11)
 despite VGGT being a 1.2 B-parameter multi-view foundation model; we
 hypothesise that VGGT's KITTI-specific motion patterns reduce the
 generalisation surface of the adaptation, an effect that is even more
