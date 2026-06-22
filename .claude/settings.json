@@ -61,10 +61,13 @@
       "Bash(tar -xzf Test134.tar.gz)",
       "Bash(tar -xzf Test134Depth.tar.gz)",
       "Bash(unzip -q leftImg8bit_trainvaltest.zip 'leftImg8bit/val/*')",
-      "Bash(unzip -q disparity_trainvaltest.zip 'disparity/val/*')"
+      "Bash(unzip -q disparity_trainvaltest.zip 'disparity/val/*')",
+      "Bash(cp anchordepth_v15.pt anchordepth.pt && ls -lh anchordepth*.pt)",
+      "Bash(hf upload *)"
     ],
     "additionalDirectories": [
-      "/home/ubuntu/ml-depth-pro/checkpoints/selfsup_v14"
+      "/home/ubuntu/ml-depth-pro/checkpoints/selfsup_v14",
+      "/home/ubuntu/ml-depth-pro"
     ]
   }
 }
