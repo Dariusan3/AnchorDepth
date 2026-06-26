@@ -20,8 +20,12 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
 from pathlib import Path
+
+# Ensure src/ is importable when running from training/ subfolder
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import h5py
 import numpy as np

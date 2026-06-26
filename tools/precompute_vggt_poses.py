@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from depth_pro.selfsup.kitti_dataset import KITTIRawDataset
 
 

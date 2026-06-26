@@ -49,7 +49,8 @@ def _depth_to_wandb_image(depth_tensor, caption):
 # Set CUDA allocator config early to reduce fragmentation OOM
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import depth_pro
 from depth_pro.selfsup.kitti_dataset import KITTIRawDataset
 from depth_pro.selfsup.pose_net import PoseNet

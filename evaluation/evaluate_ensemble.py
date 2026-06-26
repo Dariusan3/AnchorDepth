@@ -27,7 +27,7 @@ from PIL import Image
 from torchvision.transforms import Normalize, ToTensor
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import depth_pro
 from evaluate_kitti import (
     load_velodyne_points, load_calib, project_velodyne_to_cam,

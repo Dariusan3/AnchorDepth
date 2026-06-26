@@ -25,7 +25,8 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "training"))
 import depth_pro
 from train_nyu_lora import LoRALinear, apply_lora_to_encoder
 
