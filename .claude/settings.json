@@ -63,7 +63,10 @@
       "Bash(unzip -q leftImg8bit_trainvaltest.zip 'leftImg8bit/val/*')",
       "Bash(unzip -q disparity_trainvaltest.zip 'disparity/val/*')",
       "Bash(cp anchordepth_v15.pt anchordepth.pt && ls -lh anchordepth*.pt)",
-      "Bash(hf upload *)"
+      "Bash(hf upload *)",
+      "Bash(python make_class_diagram.py)",
+      "Bash(python3 make_class_diagram.py)",
+      "Bash(python3 -c \"from PIL import Image; im=Image.open\\('/home/ubuntu/ml-depth-pro/anchordepth_class_diagram.png'\\); print\\(im.size, im.info.get\\('dpi'\\)\\)\")"
     ],
     "additionalDirectories": [
       "/home/ubuntu/ml-depth-pro/checkpoints/selfsup_v14",
